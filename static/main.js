@@ -268,7 +268,6 @@ async function runSimulation() {
     target_alt  : altKm * 1000,   // metres
     t_vertical  : document.getElementById("t-vertical").value,
     n_orbits    : document.getElementById("n-orbits").value,
-    n_frames    : document.getElementById("n-frames").value,
   };
 
   btn.disabled = true;

@@ -74,7 +74,6 @@ def run():
 
     target_alt   = float(cfg["target_alt"])      # m
     n_orbits     = float(cfg.get("n_orbits", 1.5))
-    n_frames     = int(cfg.get("n_frames", 400))
 
     guidance = GuidanceProfile(
         t_vertical      = float(cfg.get("t_vertical", 20)),
@@ -187,17 +186,43 @@ def run():
     # Telemetry for full mission
     # ════════════════════════════════════════════
     tel = get_telemetry(t_full, y_full, rocket)
-    idx = np.linspace(0, len(t_full) - 1, n_frames).astype(int)
+
+    # ── Automatic frame count, based on total mission duration ──
+    # Sampling evenly-spaced INDICES of t_full (the old approach) is wrong:
+    # t_full is far denser during powered ascent (integrated with a small
+    # fixed step) than during coast/orbit phases (integrated with a much
+    # larger step), so an index-uniform pick starves the long coast/transfer
+    # phases of points — which shows up as visible straight-line "jumps"
+    # instead of a smooth curve along the orbit.
+    #
+    # Instead we resample uniformly in TIME (interpolating every channel),
+    # and size the frame count from the mission's total duration so short
+    # missions stay light and long ones (multi-orbit coasts, Hohmann
+    # transfers) still render a smooth curve — capped for browser performance.
+    T_total          = float(t_full[-1] - t_full[0])
+    FRAME_INTERVAL_S = 4.0      # target ~1 frame every 4 s of simulated time
+    MIN_FRAMES       = 400
+    MAX_FRAMES       = 1200
+    n_frames = int(np.clip(T_total / FRAME_INTERVAL_S, MIN_FRAMES, MAX_FRAMES))
+
+    t_frames         = np.linspace(t_full[0], t_full[-1], n_frames)
+    x_frames         = np.interp(t_frames, t_full, y_full[0])
+    y_frames         = np.interp(t_frames, t_full, y_full[1])
+    speed_frames     = np.interp(t_frames, t_full, tel["speed"])
+    alt_frames       = np.interp(t_frames, t_full, tel["altitude"])
+    mass_frames      = np.interp(t_frames, t_full, tel["mass"])
+    downrange_frames = np.interp(t_frames, t_full, tel["downrange"])
+    accel_frames     = np.interp(t_frames, t_full, tel["accel_g"])
 
     result = {
-        "t"         : t_full[idx].tolist(),
-        "x"         : y_full[0][idx].tolist(),
-        "y"         : y_full[1][idx].tolist(),
-        "speed"     : tel["speed"][idx].tolist(),
-        "alt"       : tel["altitude"][idx].tolist(),
-        "mass"      : tel["mass"][idx].tolist(),
-        "downrange" : tel["downrange"][idx].tolist(),
-        "accel_g"   : tel["accel_g"][idx].tolist(),
+        "t"         : t_frames.tolist(),
+        "x"         : x_frames.tolist(),
+        "y"         : y_frames.tolist(),
+        "speed"     : speed_frames.tolist(),
+        "alt"       : alt_frames.tolist(),
+        "mass"      : mass_frames.tolist(),
+        "downrange" : downrange_frames.tolist(),
+        "accel_g"   : accel_frames.tolist(),
 
         # Orbit traces
         "ellipse_x"      : x_ell.tolist(),

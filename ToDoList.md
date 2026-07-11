@@ -5,7 +5,7 @@
 ### Animation
 - [x] Fix animation playback — x1/x5/x20/x100 buttons should run continuously,
       not advance a single frame per click
-- [ ] Implement automatic frame calculation based on the total mission duration (t_full) to ensure smooth trajectories without compromising browser performance.
+- [x] Implement automatic frame calculation based on the total mission duration (t_full) to ensure smooth trajectories without compromising browser performance.
 
 ### Vehicle configuration UI
 - [ ] Add rocket presets (Falcon 9, Falcon Heavy, Ariane 5, Saturn V, custom)
