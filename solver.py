@@ -57,43 +57,64 @@ def _build_stage_events(rocket):
     return events
 
 
-def run_simulation(rocket, t_end=600, dt=0.5):
+def run_simulation(rocket, t_end=None, dt=0.5):
     """
-    Integrates the equations of motion across all staging events.
-    Restarts the integrator at each stage separation to handle
-    the discontinuous mass drop cleanly.
+    Integrates the equations of motion across all staging events, AND
+    (when the rocket's guidance supports it, i.e. PEGGuidance) periodically
+    re-solves the steering law from the real, current state — closed-loop
+    replanning — and checks whether the target orbit has actually been
+    reached, cutting off the engines right there even if propellant is
+    still left in the current stage.
 
     Returns:
         t_all : np.array - Time array across the full flight
         y_all : np.array - State array [x, y, vx, vy] across the full flight
     """
-    Re      = 6.371e6
     state0 = [Re, 0.0, 0.0, v_rot]   # Launched from equator, at rest
-    t_all   = []
-    y_all   = []
+    t_all  = []
+    y_all  = []
 
-    # Build list of time intervals between staging events
+    guidance  = rocket.guidance
+    replan_dt = getattr(guidance, "REPLAN_INTERVAL", None)
+
+    # Nominal (full-propellant) stage cutoffs, plus an outer safety bound —
+    # actual engine cutoff may happen earlier if should_cutoff() fires.
     breakpoints = [t_cut for _, _, t_cut in rocket.timeline[:-1]]
-    intervals   = list(zip(
-        [0] + breakpoints,           # Start times
-        breakpoints + [t_end]        # End times
-    ))
+    if t_end is None:
+        t_end = rocket.timeline[-1][2] * 1.2
+    stage_breaks = [0.0] + breakpoints + [t_end]
 
-    state = state0
-    for t_start, t_stop in intervals:
-        solution = solve_ivp(
-            fun      = lambda t, s: equations_of_motion(t, s, rocket),
-            t_span   = (t_start, t_stop),
-            y0       = state,
-            method   = 'RK45',
-            max_step = dt,
-            dense_output = True
-        )
+    state          = state0
+    cutoff_reached = False
 
-        t_all.append(solution.t)
-        y_all.append(solution.y)
+    for seg_start, seg_stop in zip(stage_breaks[:-1], stage_breaks[1:]):
+        if cutoff_reached:
+            break
 
-        state = solution.y[:, -1]    # Hand off final state to next stage
+        sub_t = seg_start
+        while sub_t < seg_stop - 1e-9:
+            sub_stop = min(sub_t + replan_dt, seg_stop) if replan_dt else seg_stop
+
+            if hasattr(guidance, "replan"):
+                guidance.replan(sub_t, state, rocket)
+
+            solution = solve_ivp(
+                fun      = lambda t, s: equations_of_motion(t, s, rocket),
+                t_span   = (sub_t, sub_stop),
+                y0       = state,
+                method   = 'RK45',
+                max_step = dt,
+                dense_output = True
+            )
+
+            t_all.append(solution.t)
+            y_all.append(solution.y)
+            state = solution.y[:, -1]
+            sub_t = sub_stop
+
+            if hasattr(guidance, "should_cutoff") and guidance.should_cutoff(sub_t, state, rocket):
+                cutoff_reached = True
+                break
 
     return np.concatenate(t_all), np.hstack(y_all)
 

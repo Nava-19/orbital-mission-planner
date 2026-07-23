@@ -8,9 +8,9 @@
 - [x] Implement automatic frame calculation based on the total mission duration (t_full) to ensure smooth trajectories without compromising browser performance.
 
 ### Vehicle configuration UI
-- [ ] Add rocket presets (Falcon 9, Falcon Heavy, Ariane 5, Saturn V, custom)
-- [ ] Allow adding/removing stages dynamically (not just 2 fixed stages)
-- [ ] Add propellant type selector (RP-1/LOX, LH2/LOX, solid) with typical Isp values
+- [x] Add rocket presets (Falcon 9, Falcon Heavy, Ariane 5, Saturn V, custom)
+- [x] Allow adding/removing stages dynamically (not just 2 fixed stages)
+- [x] Add propellant type selector (RP-1/LOX, LH2/LOX, solid) with typical Isp values
 
 ### HUD
 - [ ] Fix the 3 new telemetry values not showing (Acceleration, Downrange, Vehicle mass)
@@ -35,9 +35,34 @@
 - [ ] Show staging events as markers on trajectory
 
 ### Guidance
-- [ ] Implement PEG (Powered Explicit Guidance) — closed-loop guidance
+- [x] Implement PEG (Powered Explicit Guidance) — closed-loop guidance
       that adjusts pitch in real time to hit target orbit precisely,
-      replacing the current open-loop linear pitch profile
+      replacing the previous open-loop linear pitch profile.
+      Implementation notes:
+        - Simplified relative to textbook PEG: uses linear-ANGLE steering
+          (theta(t) = theta0 + rate*t) solved by numerical shooting
+          (least-squares) rather than the classical linear-TANGENT law
+          with closed-form gravity-loss integrals — far more numerically
+          robust across arbitrary, user-defined multi-stage vehicles.
+        - Re-solves the steering law every ~20s of real flight from the
+          actual (drag-affected) state — this is the closed-loop part.
+        - Targets the parking-orbit apoapsis (r = r_park, radial
+          velocity = 0) rather than an exact circular insertion, matching
+          the existing architecture (a separate circularize() burn at
+          apoapsis finishes the job) — this converges far more reliably
+          than also requiring exact circular tangential velocity.
+        - Known limitation: vehicles with a very short, extremely
+          high-thrust first stage followed by a much weaker upper stage
+          (e.g. the Ariane 5 preset: ~130s solid boosters then a ~972s,
+          low-thrust sustainer) can still converge to a noticeably
+          eccentric parking orbit — the 2-parameter steering family and
+          shooting solver occasionally settle for a mediocre fit rather
+          than an exact one for this kind of extreme stage asymmetry.
+          It no longer crashes through the Earth (the original bug), but
+          isn't as clean as Falcon 9 / Saturn V. Worth revisiting with a
+          richer steering parametrization (e.g. quadratic-in-time, or
+          true linear-tangent with closed-form gravity terms) if this
+          matters for your use case.
 
 ---
 

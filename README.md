@@ -13,8 +13,14 @@ including ascent, orbital insertion, and Hohmann transfers.
 - **Full physics engine**: numerical integration (`scipy.solve_ivp`) of the
   equations of motion, including gravity, thrust, atmospheric drag (ISA model),
   and Earth's rotation.
-- **Guided ascent**: a three-phase gravity-turn profile (vertical → pitch-over →
-  horizontal), automatically derived from the target orbit.
+- **Closed-loop guidance (PEG)**: a simplified Powered Explicit Guidance
+  algorithm re-solves the ascent steering law every ~20 s of real flight from
+  the vehicle's actual state — predicting forward with a fast internal model,
+  fitting a steering law that targets the parking-orbit apoapsis, and
+  correcting itself in flight — rather than following a fixed, hand-tuned
+  pitch schedule. Works across arbitrary user-defined vehicles, from a small
+  two-stage rocket to something as overpowered as a Saturn V, without the
+  pitch program needing to be re-tuned per vehicle.
 - **Orbital insertion**: circularization into a LEO parking orbit and, when the
   target requires it, a full **Hohmann transfer** to MEO/GEO with both Δv
   burns and transfer time computed.
@@ -46,8 +52,9 @@ orbit, and click **Launch simulation**.
 
 ```
 ├── app.py              # Flask routes and simulation orchestration
-├── vehicle.py          # Rocket, Stage classes and guidance profile
-├── solver.py           # Equations of motion and numerical integration
+├── vehicle.py          # Rocket, Stage classes and PEG closed-loop guidance
+├── solver.py           # Equations of motion, numerical integration and
+│                        # closed-loop guidance replanning / engine cutoff
 ├── orbital.py          # Orbital mechanics (elements, circularization, Hohmann)
 ├── environment.py       # Gravity and atmosphere model (ISA)
 ├── constants.py         # Physical and orbital constants
@@ -61,11 +68,17 @@ orbit, and click **Launch simulation**.
 
 See [`ToDoList.md`](ToDoList.md) for the full list. Upcoming milestones:
 
-- Closed-loop PEG (Powered Explicit Guidance)
 - Reentry and deorbit burn
 - Trans-Lunar Injection (TLI)
 - CFD integration (SU2 / OpenFOAM) for real aerodynamic coefficients
 - PDF mission report export
+
+**Known limitation**: PEG's steering solver can converge to a noticeably
+eccentric parking orbit for vehicles with a very short, extremely
+high-thrust first stage followed by a much weaker upper stage (the Ariane 5
+preset is the current example). It no longer produces an invalid trajectory,
+just a less clean one — see `ToDoList.md` for details and ideas to improve it
+further.
 
 ## 📄 License
 

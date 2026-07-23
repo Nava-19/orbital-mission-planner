@@ -2,7 +2,7 @@ import numpy as np
 from flask import Flask, render_template, request, jsonify
 
 from constants   import Mu, Re
-from vehicle     import Rocket, Stage, GuidanceProfile
+from vehicle     import Rocket, Stage, PEGGuidance
 from solver      import run_simulation, get_telemetry, run_coast
 from orbital     import compute_orbital_elements, circularize, state_at_apoapsis, propagate_orbit, hohmann_transfer
 from environment import v_circular
@@ -75,8 +75,8 @@ def run():
     target_alt   = float(cfg["target_alt"])      # m
     n_orbits     = float(cfg.get("n_orbits", 1.5))
 
-    guidance = GuidanceProfile(
-        t_vertical      = float(cfg.get("t_vertical", 20)),
+    guidance = PEGGuidance(
+        t_vertical      = float(np.clip(float(cfg.get("t_vertical", 20)), 5, 30)),
         target_altitude = target_alt,
     )
     rocket = Rocket(
@@ -98,6 +98,23 @@ def run():
         y_asc[2][-1], y_asc[3][-1]
     )
     el_meco = compute_orbital_elements(x_f, y_f, vx_f, vy_f)
+
+    # PEG can cut engines off before a stage's propellant is fully spent
+    # (e.g. an overpowered vehicle reaching its parking orbit early), so the
+    # actual MECO time may fall mid-stage rather than at its nominal,
+    # full-propellant cutoff. Reconstruct the per-stage burnout list — and
+    # the leftover propellant, if any — from what actually happened.
+    meco_time      = float(t_asc[-1])
+    stage_burnouts = []
+    prop_margin_kg = 0.0
+    for stage, t_ign, t_cut in rocket.timeline:
+        if meco_time <= t_ign:
+            break
+        stage_burnouts.append(min(t_cut, meco_time))
+        if meco_time < t_cut:
+            burned_frac    = (meco_time - t_ign) / (t_cut - t_ign)
+            prop_margin_kg = stage.prop_mass * (1 - burned_frac)
+            break
 
     # ════════════════════════════════════════════
     # PHASE 2 — Coast from MECO to parking orbit apoapsis
@@ -244,7 +261,8 @@ def run():
         "burn_y"   : float(circ["y_apo"]),
 
         "summary": {
-            "stage_burnouts": [float(t_cut) for (_, _, t_cut) in rocket.timeline],
+            "stage_burnouts": stage_burnouts,
+            "prop_margin_kg": float(prop_margin_kg),
             "t_coast_start" : float(t_coast_start),
             "max_alt_km"    : float(tel["altitude"].max() / 1000),
             "max_speed_kms" : float(tel["speed"].max() / 1000),
