@@ -74,8 +74,9 @@ def run_simulation(rocket, t_end=None, dt=0.5):
     t_all  = []
     y_all  = []
 
-    guidance  = rocket.guidance
-    replan_dt = getattr(guidance, "REPLAN_INTERVAL", None)
+    guidance   = rocket.guidance
+    replan_dt  = getattr(guidance, "REPLAN_INTERVAL", None)
+    has_cutoff = hasattr(guidance, "should_cutoff")
 
     # Nominal (full-propellant) stage cutoffs, plus an outer safety bound —
     # actual engine cutoff may happen earlier if should_cutoff() fires.
@@ -112,7 +113,7 @@ def run_simulation(rocket, t_end=None, dt=0.5):
             state = solution.y[:, -1]
             sub_t = sub_stop
 
-            if hasattr(guidance, "should_cutoff") and guidance.should_cutoff(sub_t, state, rocket):
+            if has_cutoff and guidance.should_cutoff(sub_t, state, rocket):
                 cutoff_reached = True
                 break
 

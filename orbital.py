@@ -147,10 +147,26 @@ def circularize(x, y, vx, vy):
     # Mean anomaly at apoapsis (ν=180°)
     M_apo = np.pi
 
-    # Coast time = time to go from M_now to M_apo
-    n       = 2 * np.pi / T            # Mean motion (rad/s)
-    delta_M = (M_apo - M_now) % (2 * np.pi)
-    t_coast = delta_M / n              # s
+    # Coast time = time to go from M_now to M_apo.
+    # Using a plain (M_apo - M_now) % (2*pi) is fragile right around
+    # apoapsis itself: if we're just a hair PAST it (e.g. MECO landed a few
+    # degrees past the true anomaly of 180°, which can happen — engine
+    # cutoff is checked periodically, not at infinite resolution), the
+    # modulo wraps almost all the way around to nearly a FULL orbital
+    # period, computing "coast to the next apoapsis" instead of recognizing
+    # we're already basically there. Using the signed difference wrapped to
+    # (-pi, pi] and snapping small differences (either side) to zero avoids
+    # that — matching the physical reality of "we're at the apex" as
+    # PEG intends, regardless of which side of the exact peak MECO fell on.
+    n = 2 * np.pi / T                      # Mean motion (rad/s)
+    diff = (M_apo - M_now + np.pi) % (2 * np.pi) - np.pi   # signed, in (-pi, pi]
+    APOAPSIS_SNAP_RAD = np.radians(45)     # within ~45° of apex counts as "there"
+    snapped = abs(diff) < APOAPSIS_SNAP_RAD
+    if snapped:
+        t_coast = 0.0
+    else:
+        delta_M = diff % (2 * np.pi)
+        t_coast = delta_M / n              # s
 
     # --- Circularization delta-V ---
     # Circular orbit velocity at apoapsis altitude
@@ -160,14 +176,30 @@ def circularize(x, y, vx, vy):
     # --- Final circular orbit elements ---
     # After burn: periapsis raised to apoapsis altitude → circular orbit
     # State at apoapsis after burn: position at r_a, velocity = v_circ tangentially
-    omega_peri = elements["omega_peri"]
-    # Apoapsis is at angle omega_peri + 180°
-    theta_apo = omega_peri + np.pi
-    x_apo  =  r_a * np.cos(theta_apo)
-    y_apo  =  r_a * np.sin(theta_apo)
-    # Velocity is perpendicular to position (tangential) at apoapsis
-    vx_apo = -v_circ * np.sin(theta_apo)
-    vy_apo =  v_circ * np.cos(theta_apo)
+    if snapped:
+        # We've snapped t_coast to 0 — meaning downstream code treats the
+        # CURRENT position (wherever the ascent/coast trajectory actually
+        # ended up, up to ~45° of true anomaly from the exact apex) as "the"
+        # apoapsis. The circularization point must match that same real
+        # position, not the mathematically exact nu=180° point (which the
+        # trajectory doesn't actually pass through when snapped) — using
+        # the exact point instead created a visible backward jump where the
+        # animated trajectory teleported a few degrees "backward" along the
+        # orbit right as the parking-orbit coast phase began.
+        r_here = np.sqrt(x**2 + y**2)
+        v_circ = np.sqrt(Mu / r_here)     # recompute at the actual radius
+        tx, ty = -y / r_here, x / r_here  # tangential unit vector, prograde
+        x_apo, y_apo   = x, y
+        vx_apo, vy_apo = v_circ * tx, v_circ * ty
+    else:
+        omega_peri = elements["omega_peri"]
+        # Apoapsis is at angle omega_peri + 180°
+        theta_apo = omega_peri + np.pi
+        x_apo  =  r_a * np.cos(theta_apo)
+        y_apo  =  r_a * np.sin(theta_apo)
+        # Velocity is perpendicular to position (tangential) at apoapsis
+        vx_apo = -v_circ * np.sin(theta_apo)
+        vy_apo =  v_circ * np.cos(theta_apo)
 
     elements_final = compute_orbital_elements(x_apo, y_apo, vx_apo, vy_apo)
 
