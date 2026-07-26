@@ -169,9 +169,17 @@ def circularize(x, y, vx, vy):
         t_coast = delta_M / n              # s
 
     # --- Circularization delta-V ---
-    # Circular orbit velocity at apoapsis altitude
-    v_circ = np.sqrt(Mu / r_a)        # m/s
-    delta_v = v_circ - v_a            # m/s - Prograde burn at apoapsis
+    if snapped:
+        # Use the REAL radius/speed at the current (snapped) position,
+        # not the idealized exact-apoapsis values — consistent with using
+        # the real position for x_apo/y_apo below.
+        r_a_eff = np.sqrt(x**2 + y**2)
+        v_a_eff = np.sqrt(vx**2 + vy**2)
+    else:
+        r_a_eff = r_a
+        v_a_eff = v_a
+    v_circ  = np.sqrt(Mu / r_a_eff)   # m/s
+    delta_v = v_circ - v_a_eff        # m/s - Prograde burn at apoapsis
 
     # --- Final circular orbit elements ---
     # After burn: periapsis raised to apoapsis altitude → circular orbit
@@ -186,8 +194,7 @@ def circularize(x, y, vx, vy):
         # the exact point instead created a visible backward jump where the
         # animated trajectory teleported a few degrees "backward" along the
         # orbit right as the parking-orbit coast phase began.
-        r_here = np.sqrt(x**2 + y**2)
-        v_circ = np.sqrt(Mu / r_here)     # recompute at the actual radius
+        r_here = r_a_eff
         tx, ty = -y / r_here, x / r_here  # tangential unit vector, prograde
         x_apo, y_apo   = x, y
         vx_apo, vy_apo = v_circ * tx, v_circ * ty
@@ -206,7 +213,7 @@ def circularize(x, y, vx, vy):
     return {
         "t_coast"        : t_coast,           # s   - Coast time to apoapsis
         "delta_v"        : delta_v,           # m/s - Required delta-V
-        "alt_circular"   : r_a - Re,          # m   - Circular orbit altitude
+        "alt_circular"   : r_a_eff - Re,      # m   - Circular orbit altitude
         "v_circular"     : v_circ,            # m/s - Circular orbital speed
         "e_final"        : elements_final["e"],
         "elements_final" : elements_final,
