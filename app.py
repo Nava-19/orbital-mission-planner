@@ -263,6 +263,8 @@ def run():
         "summary": {
             "stage_burnouts": stage_burnouts,
             "prop_margin_kg": float(prop_margin_kg),
+            "t_apo"         : float(t_apo),
+            "t_park_end"    : float(t_park_end) if needs_hohmann else None,
             "t_coast_start" : float(t_coast_start),
             "max_alt_km"    : float(tel["altitude"].max() / 1000),
             "max_speed_kms" : float(tel["speed"].max() / 1000),

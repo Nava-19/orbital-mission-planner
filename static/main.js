@@ -572,7 +572,15 @@ function updateHUD(data, i) {
     if (t < burnouts[k]) { phase = `Stage ${k + 1} burn`; break; }
   }
   if (phase === null) {
-    phase = t < s.t_coast_start ? "Coast to apoapsis" : "Circular orbit";
+    if (t < s.t_apo) {
+      phase = "Coast to apoapsis";
+    } else if (s.needs_hohmann && s.t_park_end !== null && t < s.t_park_end) {
+      phase = "Parking orbit coast";
+    } else if (s.needs_hohmann && t < s.t_coast_start) {
+      phase = "Hohmann transfer coast";
+    } else {
+      phase = "Circular orbit";
+    }
   }
   document.getElementById("hud-phase").textContent = phase;
 

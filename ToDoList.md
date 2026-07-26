@@ -13,7 +13,11 @@
 - [x] Add propellant type selector (RP-1/LOX, LH2/LOX, solid) with typical Isp values
 
 ### HUD
-- [ ] Fix the 3 new telemetry values not showing (Acceleration, Downrange, Vehicle mass)
+- [x] Fix the 3 new telemetry values not showing (Acceleration, Downrange, Vehicle mass) —
+      turned out to already be fixed as a side effect of the automatic
+      frame-calculation change (accel_g/downrange/mass are now included in
+      the served JSON, which they weren't before that refactor). Confirmed
+      working end-to-end.
 - [ ] Add mission phase label for Hohmann transfer ellipse coast
 - [ ] Add propellant remaining (actual out of total + %) for the active stage
 - [ ] Add time to next event (MECO, staging, circularization burn)
