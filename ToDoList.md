@@ -18,9 +18,9 @@
       frame-calculation change (accel_g/downrange/mass are now included in
       the served JSON, which they weren't before that refactor). Confirmed
       working end-to-end.
-- [ ] Add mission phase label for Hohmann transfer ellipse coast
-- [ ] Add propellant remaining (actual out of total + %) for the active stage
-- [ ] Add time to next event (MECO, staging, circularization burn)
+- [x] Add mission phase label for Hohmann transfer ellipse coast
+- [x] Add propellant remaining (actual out of total + %) for the active stage
+- [x] Add time to next event (MECO, staging, circularization burn)
 
 ---
 

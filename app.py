@@ -74,6 +74,8 @@ def run():
 
     target_alt   = float(cfg["target_alt"])      # m
     n_orbits     = float(cfg.get("n_orbits", 1.5))
+    oms_dv_budget = float(cfg.get("oms_dv_budget", 2000))   # m/s — payload/upper-stage
+                                                             # maneuvering propellant budget
 
     guidance = PEGGuidance(
         t_vertical      = float(np.clip(float(cfg.get("t_vertical", 20)), 5, 30)),
@@ -134,8 +136,8 @@ def run():
     transfer      = hohmann_transfer(parking_alt, target_alt) if needs_hohmann else None
     tr            = transfer  # always defined — None if no Hohmann
 
-    if needs_hohmann and transfer is not None:
-        tr = transfer   # local alias — always a dict inside this block
+    if needs_hohmann and tr is not None:
+        # tr is narrowed to a plain dict (not Optional) for the rest of this block
 
         # 3a — Half a parking orbit before transfer burn
         T_park      = circ["elements_final"]["T"]
@@ -200,6 +202,92 @@ def run():
         x_tr = y_tr = []
 
     # ════════════════════════════════════════════
+    # OMS Δv budget bookkeeping
+    # ════════════════════════════════════════════
+    # Every burn after MECO (circularization, the Hohmann transfer's two
+    # burns, and now an optional second maneuver) has so far been modeled
+    # as a "free" instantaneous velocity change — but by the time PEG cuts
+    # engines off at MECO, the ascent stages have no propellant left (PEG
+    # deliberately uses all of it to hit the parking orbit precisely). None
+    # of these burns are actually free. Rather than track propellant mass
+    # stage-by-stage for burns that happen after staging is already done,
+    # the payload/upper stage gets a single Δv budget (m/s) — the same way
+    # real satellites and kick stages are specified (a total maneuvering
+    # capacity), independent of the launch vehicle's own propellant.
+    oms_baseline_cost = abs(circ["delta_v"])
+    if needs_hohmann and tr is not None:
+        oms_baseline_cost += abs(tr["dv1"]) + abs(tr["dv2"])
+    oms_over_budget = oms_baseline_cost > oms_dv_budget
+
+    # ════════════════════════════════════════════
+    # PHASE 4 — Optional second maneuver (raise/lower orbit)
+    # ════════════════════════════════════════════
+    # A generic "apply a delta-v at the end of the current trajectory, then
+    # coast in the resulting orbit" building block — deliberately generic
+    # rather than special-cased to Hohmann, since reentry (a retrograde
+    # burn) and a future Trans-Lunar Injection (a large prograde burn) are
+    # both just specific applications of the same mechanism.
+    maneuver = cfg.get("second_maneuver")
+    x_maneuver_orb = y_maneuver_orb = []
+    t_maneuver = None
+    maneuver_dv_requested = 0.0
+    maneuver_dv_applied   = 0.0
+    if maneuver and maneuver.get("enabled"):
+        dv_requested = float(maneuver.get("delta_v", 0))
+        wait_s       = float(maneuver.get("wait_min", 0)) * 60.0
+
+        # Clip the requested burn to whatever's left of the OMS budget
+        # after circularization/Hohmann already spent their share. If the
+        # baseline alone already blew the budget, no Δv is left at all.
+        oms_remaining = max(0.0, oms_dv_budget - oms_baseline_cost)
+        dv_maneuver   = float(np.clip(dv_requested, -oms_remaining, oms_remaining))
+        maneuver_dv_requested = dv_requested
+        maneuver_dv_applied   = dv_maneuver
+
+        # Coast a bit longer in the CURRENT orbit first if requested, so the
+        # burn doesn't always have to happen right where the initial coast
+        # already ended.
+        if wait_s > 0:
+            state_pre = y_full[:, -1]
+            t_wait, y_wait = run_coast(state_pre, t_full[-1], t_full[-1] + wait_s)
+            t_full = np.concatenate([t_full, t_wait])
+            y_full = np.hstack([y_full, y_wait])
+
+        t_maneuver = float(t_full[-1])
+        x_m, y_m, vx_m, vy_m = y_full[:, -1]
+        v_mag = np.hypot(vx_m, vy_m)
+
+        # Prograde burn (positive dv raises the opposite apsis, negative
+        # lowers it) — velocity direction scaled up/down, direction unchanged
+        # unless dv_maneuver is large/negative enough to reverse it (not
+        # physically meaningful here, so it's left as-is; the UI keeps the
+        # delta-v within a sane range relative to current orbital speed).
+        scale = (v_mag + dv_maneuver) / v_mag if v_mag > 0 else 1.0
+        vx_new, vy_new = vx_m * scale, vy_m * scale
+
+        elements_new = compute_orbital_elements(x_m, y_m, vx_new, vy_new)
+        T_new        = elements_new["T"]
+        t_man_end    = t_maneuver + n_orbits * T_new
+        t_man, y_man = run_coast([x_m, y_m, vx_new, vy_new], t_maneuver, t_man_end)
+
+        t_full = np.concatenate([t_full, t_man])
+        y_full = np.hstack([y_full, y_man])
+
+        x_maneuver_orb, y_maneuver_orb = propagate_orbit(elements_new)
+
+    # List of every OMS burn that happens, in order, with when it happens —
+    # lets the frontend compute "how much OMS budget is left" at any point
+    # in time (not just the final total), for the HUD's Propellant readout
+    # during coast phases (no ascent stage is active then, but the payload
+    # still has OMS Δv it hasn't spent yet).
+    oms_burns = [{"t": float(t_apo), "dv": float(abs(circ["delta_v"])), "label": "Circularization"}]
+    if needs_hohmann and tr is not None:
+        oms_burns.append({"t": float(t_park_end), "dv": float(abs(tr["dv1"])), "label": "Transfer injection"})
+        oms_burns.append({"t": float(t_coast_start), "dv": float(abs(tr["dv2"])), "label": "Circularization at target"})
+    if t_maneuver is not None and abs(maneuver_dv_applied) > 0:
+        oms_burns.append({"t": float(t_maneuver), "dv": float(abs(maneuver_dv_applied)), "label": "Second maneuver"})
+
+    # ════════════════════════════════════════════
     # Telemetry for full mission
     # ════════════════════════════════════════════
     tel = get_telemetry(t_full, y_full, rocket)
@@ -231,6 +319,23 @@ def run():
     downrange_frames = np.interp(t_frames, t_full, tel["downrange"])
     accel_frames     = np.interp(t_frames, t_full, tel["accel_g"])
 
+    # Active stage + remaining propellant fraction at each frame — used by
+    # the HUD to show e.g. "Stage 2: 64% (18.2 t / 28.4 t)". None while
+    # coasting between/after stages (no active stage burning propellant).
+    active_stage_frames = []
+    prop_frac_frames    = []
+    for t in t_frames:
+        stage, t_ign = rocket._get_active_stage(float(t))
+        if stage is None:
+            active_stage_frames.append(None)
+            prop_frac_frames.append(None)
+        else:
+            idx = next(i for i, (s, _, _) in enumerate(rocket.timeline) if s is stage)
+            remaining = stage.prop_mass - stage.mdot * (t - t_ign)
+            frac = float(np.clip(remaining / stage.prop_mass, 0.0, 1.0))
+            active_stage_frames.append(idx)
+            prop_frac_frames.append(frac)
+
     result = {
         "t"         : t_frames.tolist(),
         "x"         : x_frames.tolist(),
@@ -240,6 +345,8 @@ def run():
         "mass"      : mass_frames.tolist(),
         "downrange" : downrange_frames.tolist(),
         "accel_g"   : accel_frames.tolist(),
+        "active_stage": active_stage_frames,
+        "prop_frac"   : prop_frac_frames,
 
         # Orbit traces
         "ellipse_x"      : x_ell.tolist(),
@@ -251,6 +358,8 @@ def run():
         "transfer_x"     : (x_tr.tolist() if isinstance(x_tr, np.ndarray) else list(x_tr)),
         "transfer_y"     : (y_tr.tolist() if isinstance(y_tr, np.ndarray) else list(y_tr)),
         "needs_hohmann"  : needs_hohmann,
+        "maneuver_x"     : (x_maneuver_orb.tolist() if isinstance(x_maneuver_orb, np.ndarray) else list(x_maneuver_orb)),
+        "maneuver_y"     : (y_maneuver_orb.tolist() if isinstance(y_maneuver_orb, np.ndarray) else list(y_maneuver_orb)),
 
         # Key positions
         "launch_x" : float(y_full[0][0]),
@@ -262,9 +371,18 @@ def run():
 
         "summary": {
             "stage_burnouts": stage_burnouts,
+            "stage_prop_masses_kg": [float(s.prop_mass) for s, _, _ in rocket.timeline],
             "prop_margin_kg": float(prop_margin_kg),
+            "oms_dv_budget"        : float(oms_dv_budget),
+            "oms_baseline_cost"    : float(oms_baseline_cost),
+            "oms_burns"            : oms_burns,
+            "oms_over_budget"      : bool(oms_over_budget),
+            "maneuver_dv_requested": float(maneuver_dv_requested),
+            "maneuver_dv_applied"  : float(maneuver_dv_applied),
+            "maneuver_limited"     : bool(abs(maneuver_dv_applied) < abs(maneuver_dv_requested) - 1e-6),
             "t_apo"         : float(t_apo),
             "t_park_end"    : float(t_park_end) if needs_hohmann else None,
+            "t_maneuver"    : t_maneuver,
             "t_coast_start" : float(t_coast_start),
             "max_alt_km"    : float(tel["altitude"].max() / 1000),
             "max_speed_kms" : float(tel["speed"].max() / 1000),

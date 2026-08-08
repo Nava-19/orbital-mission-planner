@@ -78,6 +78,19 @@ nav { display: flex; gap: 4px; }
   color: var(--accent); margin-bottom: 16px;
 }
 
+/* ── Layer toggles (viewer sidebar) ── */
+.layer-toggle {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; color: var(--text);
+  cursor: pointer; user-select: none;
+  padding: 4px 0;
+}
+.layer-toggle input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 15px; height: 15px; cursor: pointer;
+}
+.layer-toggle:not(:last-child) { margin-bottom: 2px; }
+
 /* ── Fields ── */
 .field { display: flex; flex-direction: column; gap: 5px; }
 .field label { font-size: 12px; color: var(--text-dim); }
@@ -290,3 +303,15 @@ nav { display: flex; gap: 4px; }
   transition: border-color 0.15s, color 0.15s;
 }
 .back-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+.toggle-label {
+  display: flex; align-items: center; gap: 8px;
+  cursor: pointer; font-size: inherit; font-weight: inherit;
+}
+.toggle-label input[type="checkbox"] {
+  width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer;
+}
+.field-hint {
+  font-size: 11px; color: var(--text-dim); line-height: 1.5;
+  margin: 10px 0 0;
+}

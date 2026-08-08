@@ -1,5 +1,18 @@
 const Re = 6.371e6;
 const Mu = 3.986004418e14;
+const OMEGA_EARTH = 7.2921150e-5; // rad/s — Earth's rotation rate
+
+// Layer visibility toggles (Ground track / Terminator / Staging markers)
+const layerVisible = { groundtrack: true, terminator: true, staging: true };
+
+// Fixed inertial sun direction (arbitrary but constant — the sim has no
+// real calendar epoch, so we just pick a direction that gives a nice
+// day/night split and terminator geometry).
+const SUN_DIR = (() => {
+  const v = [0.55, -0.7, 0.35];
+  const n = Math.hypot(v[0], v[1], v[2]);
+  return [v[0] / n, v[1] / n, v[2] / n];
+})();
 
 let simData     = null;
 let frameIdx    = 0;
@@ -212,6 +225,11 @@ const ORBIT_LABELS = {
   custom: "Custom altitude",
 };
 
+function toggleManeuverFields() {
+  const enabled = document.getElementById("maneuver-enabled").checked;
+  document.getElementById("maneuver-fields").style.display = enabled ? "block" : "none";
+}
+
 function selectOrbit(btn, key, altKm) {
   document.querySelectorAll(".preset-btn").forEach(b => b.classList.remove("active"));
   btn.classList.add("active");
@@ -264,10 +282,16 @@ async function runSimulation() {
 
   const payload = {
     stages,
-    payload_mass: document.getElementById("payload-mass").value,
-    target_alt  : altKm * 1000,   // metres
-    t_vertical  : document.getElementById("t-vertical").value,
-    n_orbits    : document.getElementById("n-orbits").value,
+    payload_mass  : document.getElementById("payload-mass").value,
+    target_alt    : altKm * 1000,   // metres
+    t_vertical    : document.getElementById("t-vertical").value,
+    n_orbits      : document.getElementById("n-orbits").value,
+    oms_dv_budget : document.getElementById("oms-dv-budget").value,
+    second_maneuver: {
+      enabled : document.getElementById("maneuver-enabled").checked,
+      delta_v : document.getElementById("maneuver-dv").value,
+      wait_min: document.getElementById("maneuver-wait").value,
+    },
   };
 
   btn.disabled = true;
@@ -300,36 +324,205 @@ async function runSimulation() {
 }
 
 // ─────────────────────────────────────────────
-// Earth sphere
+// Earth sphere — procedural land/ocean/ice texture + day/night shading
 // ─────────────────────────────────────────────
-function earthSphere(n = 60) {
+//
+// NOTE on a bug fixed here: an earlier version baked day/night into the
+// surfacecolor scalar itself (6 discrete categories through a "stepped"
+// colorscale). That broke two ways: (1) Plotly requires a colorscale's
+// stops to start at exactly 0 and end at exactly 1 — the stepped-stop
+// trick landed the last stop at 0.999999, which is invalid and made
+// Plotly silently fall back to its own default colorscale (the
+// unexpected orange/cream rendering). (2) Even fixed, Plotly's surface
+// trace Gouraud-shades (linearly blends) the *already colorscale-mapped*
+// RGB across each face, so "hard" category steps still blend into muddy
+// in-between hues wherever neighbouring grid vertices differ.
+//
+// Fix: keep surfacecolor to a genuinely continuous land/ocean/ice value
+// (valid, strictly-increasing colorscale from 0 to 1 — blending here is
+// correct and desired, it's what makes coastlines look smooth) and hand
+// day/night shading back to Plotly's real lighting model via
+// `lightposition`, exactly like the original implementation did.
+function landMask(latDeg, lonDeg) {
+  // Deterministic pseudo-continents: a handful of overlapping sine lobes.
+  // Not real coastlines, but gives a non-uniform, "planet-like" surface
+  // instead of a flat ocean-colored ball. Returns a continuous value
+  // (not thresholded) so the land/ocean colorscale transition is smooth.
+  const lat = latDeg * Math.PI / 180;
+  const lon = lonDeg * Math.PI / 180;
+  let s = 0;
+  s += Math.sin(3 * lon + 0.6) * Math.cos(2 * lat);
+  s += Math.sin(2 * lon - 1.9) * Math.cos(3 * lat + 0.4) * 0.8;
+  s += Math.sin(5 * lon + 2.2) * Math.cos(1.5 * lat - 0.7) * 0.5;
+  s += Math.cos(4 * lon - 0.3) * Math.sin(2.5 * lat + 1.1) * 0.4;
+  return s;
+}
+
+function smoothstep(edge0, edge1, x) {
+  const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
+// Valid Plotly colorscale: strictly increasing stops, starts at 0, ends
+// at 1. Ocean -> coastline -> land -> polar ice, all continuous.
+const EARTH_COLORSCALE = [
+  [0.00, "rgb(8,40,90)"],
+  [0.40, "rgb(15,65,120)"],
+  [0.44, "rgb(90,120,60)"],
+  [0.70, "rgb(50,110,55)"],
+  [0.90, "rgb(70,100,55)"],
+  [1.00, "rgb(245,248,250)"],
+];
+
+function earthSphere(n = 90) {
   const u = linspace(0, 2 * Math.PI, n);
   const v = linspace(0, Math.PI, n);
-  const x = [], y = [], z = [];
+  const x = [], y = [], z = [], surfacecolor = [];
   for (let vi of v) {
-    const xrow = [], yrow = [], zrow = [];
+    const xrow = [], yrow = [], zrow = [], crow = [];
+    const latDeg = 90 - vi * 180 / Math.PI;
     for (let ui of u) {
-      xrow.push(Re * Math.cos(ui) * Math.sin(vi));
-      yrow.push(Re * Math.sin(ui) * Math.sin(vi));
-      zrow.push(Re * Math.cos(vi));
+      const xi = Re * Math.cos(ui) * Math.sin(vi);
+      const yi = Re * Math.sin(ui) * Math.sin(vi);
+      const zi = Re * Math.cos(vi);
+      xrow.push(xi); yrow.push(yi); zrow.push(zi);
+
+      const lonDeg = ui * 180 / Math.PI;
+      // Land fraction in [0,1]; ~0.35 threshold gives a roughly
+      // Earth-like ocean/land ratio, smoothed over a narrow band so
+      // coastlines aren't jagged.
+      const landRaw  = landMask(latDeg, lonDeg);
+      const landFrac = smoothstep(0.25, 0.45, landRaw);
+      let scalar = 0.40 + landFrac * 0.30; // 0.40 ocean..0.70 land
+
+      // Blend toward polar ice near the poles.
+      const iceFrac = smoothstep(72, 85, Math.abs(latDeg));
+      scalar = scalar * (1 - iceFrac) + 1.0 * iceFrac;
+
+      crow.push(scalar);
     }
-    x.push(xrow); y.push(yrow); z.push(zrow);
+    x.push(xrow); y.push(yrow); z.push(zrow); surfacecolor.push(crow);
   }
+
+  // Sun far away along SUN_DIR — Plotly's Lambertian shading then does
+  // the day/night falloff for us, in sync with the terminator line below.
+  const D = 5e8;
   return {
     type: "surface", x, y, z,
-    surfacecolor: x.map(r => r.map(_ => 0)),
-    colorscale: [[0, "rgb(10,40,80)"], [1, "rgb(30,80,120)"]],
+    surfacecolor,
+    colorscale: EARTH_COLORSCALE,
+    cmin: 0, cmax: 1,
     showscale: false, opacity: 1,
-    lighting: { ambient: 0.6, diffuse: 0.8, specular: 0.3, roughness: 0.5 },
-    lightposition: { x: 100000, y: 100000, z: 100000 },
+    lighting: { ambient: 0.22, diffuse: 0.85, specular: 0.1, roughness: 0.6 },
+    lightposition: { x: SUN_DIR[0] * D, y: SUN_DIR[1] * D, z: SUN_DIR[2] * D },
     hoverinfo: "skip", name: "Earth",
   };
+}
+
+// ─────────────────────────────────────────────
+// Terminator (day/night boundary) — great circle perpendicular to SUN_DIR
+// ─────────────────────────────────────────────
+function terminatorTrace(r = Re * 1.003, n = 120) {
+  // Any two unit vectors orthogonal to SUN_DIR and to each other span the
+  // terminator plane.
+  const s = SUN_DIR;
+  let ref = Math.abs(s[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+  const e1 = normalize(cross(s, ref));
+  const e2 = normalize(cross(s, e1));
+  const x = [], y = [], z = [];
+  for (let i = 0; i <= n; i++) {
+    const a = 2 * Math.PI * i / n;
+    x.push(r * (e1[0] * Math.cos(a) + e2[0] * Math.sin(a)));
+    y.push(r * (e1[1] * Math.cos(a) + e2[1] * Math.sin(a)));
+    z.push(r * (e1[2] * Math.cos(a) + e2[2] * Math.sin(a)));
+  }
+  return {
+    type: "scatter3d", mode: "lines",
+    x, y, z,
+    line: { color: "rgba(255,220,120,0.55)", width: 3 },
+    name: "Terminator", hoverinfo: "skip",
+    visible: layerVisible.terminator,
+  };
+}
+
+function cross(a, b) {
+  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
+function normalize(v) {
+  const n = Math.hypot(v[0], v[1], v[2]) || 1;
+  return [v[0] / n, v[1] / n, v[2] / n];
 }
 
 function linspace(a, b, n) {
   const arr = [];
   for (let i = 0; i < n; i++) arr.push(a + (b - a) * i / (n - 1));
   return arr;
+}
+
+// ─────────────────────────────────────────────
+// Ground track — sub-satellite point projected onto the rotating Earth
+// ─────────────────────────────────────────────
+// The flight is simulated in a single fixed inertial plane (Plotly x/z,
+// with y always 0), i.e. an orbital plane containing the polar axis. As
+// Earth spins underneath that fixed plane, the sub-satellite point's
+// Earth-fixed longitude drifts — that drift is exactly what produces the
+// classic "sinusoidal" ground-track spiral.
+function groundPoint(X, Z, t) {
+  const r = Math.hypot(X, Z) || 1;
+  const latDeg = 90 - Math.acos(Math.max(-1, Math.min(1, Z / r))) * 180 / Math.PI;
+  const inertialLonDeg = X >= 0 ? 0 : 180;
+  const earthRotDeg = OMEGA_EARTH * t * 180 / Math.PI;
+  let lonDeg = inertialLonDeg - earthRotDeg;
+  lonDeg = ((lonDeg + 180) % 360 + 360) % 360 - 180; // wrap to [-180, 180]
+  return { lat: latDeg, lon: lonDeg };
+}
+
+function latLonToXYZ(latDeg, lonDeg, r) {
+  const lat = latDeg * Math.PI / 180, lon = lonDeg * Math.PI / 180;
+  return [r * Math.cos(lon) * Math.cos(lat), r * Math.sin(lon) * Math.cos(lat), r * Math.sin(lat)];
+}
+
+function groundTrackXYZ(data) {
+  const r = Re * 1.004;
+  const xs = [], ys = [], zs = [];
+  for (let i = 0; i < data.t.length; i++) {
+    const { lat, lon } = groundPoint(data.x[i], data.y[i], data.t[i]);
+    const [gx, gy, gz] = latLonToXYZ(lat, lon, r);
+    xs.push(gx); ys.push(gy); zs.push(gz);
+  }
+  return { xs, ys, zs };
+}
+
+function interp1(tArr, vArr, t) {
+  if (t <= tArr[0]) return vArr[0];
+  if (t >= tArr[tArr.length - 1]) return vArr[vArr.length - 1];
+  let lo = 0, hi = tArr.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (tArr[mid] <= t) lo = mid; else hi = mid;
+  }
+  const f = (t - tArr[lo]) / (tArr[hi] - tArr[lo] || 1);
+  return vArr[lo] + f * (vArr[hi] - vArr[lo]);
+}
+
+function stagingMarkerTrace(data) {
+  const burnouts = (data.summary && data.summary.stage_burnouts) || [];
+  const x = [], y = [], z = [], text = [];
+  burnouts.forEach((tb, k) => {
+    const xi = interp1(data.t, data.x, tb);
+    const yi = interp1(data.t, data.y, tb);
+    x.push(xi); y.push(0); z.push(yi);
+    text.push(k < burnouts.length - 1 ? `Stage ${k + 1} sep.` : "MECO");
+  });
+  return {
+    type: "scatter3d", mode: "markers+text",
+    x, y, z, text,
+    textposition: "top center",
+    textfont: { color: "#ffb454", size: 10 },
+    marker: { color: "#ffb454", size: 5, symbol: "diamond-open" },
+    name: "Staging events", hoverinfo: "text",
+    visible: layerVisible.staging,
+  };
 }
 
 // ─────────────────────────────────────────────
@@ -341,6 +534,35 @@ function buildPlot(data) {
 
   // Earth
   traces.push(earthSphere());
+
+  // Terminator (day/night boundary)
+  traces.push(terminatorTrace());
+  window._terminatorIdx = traces.length - 1;
+
+  // Staging event markers (stage separation / MECO positions)
+  traces.push(stagingMarkerTrace(d));
+  window._stagingIdx = traces.length - 1;
+
+  // Ground track (progressive, mirrors the trajectory trace) + current
+  // sub-satellite marker
+  const gt = groundTrackXYZ(d);
+  window._groundTrackData = gt;
+  traces.push({
+    type: "scatter3d", mode: "lines",
+    x: [gt.xs[0]], y: [gt.ys[0]], z: [gt.zs[0]],
+    line: { color: "rgba(120,255,180,0.8)", width: 3 },
+    name: "Ground track", hoverinfo: "skip",
+    visible: layerVisible.groundtrack,
+  });
+  window._groundTrackIdx = traces.length - 1;
+  traces.push({
+    type: "scatter3d", mode: "markers",
+    x: [gt.xs[0]], y: [gt.ys[0]], z: [gt.zs[0]],
+    marker: { color: "#78ffb4", size: 5, symbol: "circle" },
+    name: "Sub-satellite point", hoverinfo: "skip",
+    visible: layerVisible.groundtrack,
+  });
+  window._subSatIdx = traces.length - 1;
 
   // Ghost trajectory
   traces.push({
@@ -376,6 +598,17 @@ function buildPlot(data) {
       x: d.transfer_x, y: d.transfer_x.map(_ => 0), z: d.transfer_y,
       line: { color: "gold", width: 2, dash: "dot" },
       name: `Hohmann transfer ellipse`,
+      hoverinfo: "skip",
+    });
+  }
+
+  // Post-maneuver orbit (second maneuver, if enabled and it produced a trace)
+  if (d.maneuver_x && d.maneuver_x.length > 0) {
+    traces.push({
+      type: "scatter3d", mode: "lines",
+      x: d.maneuver_x, y: d.maneuver_x.map(_ => 0), z: d.maneuver_y,
+      line: { color: "magenta", width: 2, dash: "dash" },
+      name: `Post-maneuver orbit`,
       hoverinfo: "skip",
     });
   }
@@ -550,7 +783,37 @@ function updateFrame(data, i) {
     z: [[data.y[i]]],
   }, [window._rocketIdx]);
 
+  // Ground track + sub-satellite point, kept in sync with the trajectory
+  const gt = window._groundTrackData;
+  if (gt) {
+    Plotly.restyle("plot3d", {
+      x: [gt.xs.slice(0, i + 1)],
+      y: [gt.ys.slice(0, i + 1)],
+      z: [gt.zs.slice(0, i + 1)],
+    }, [window._groundTrackIdx]);
+
+    Plotly.restyle("plot3d", {
+      x: [[gt.xs[i]]],
+      y: [[gt.ys[i]]],
+      z: [[gt.zs[i]]],
+    }, [window._subSatIdx]);
+  }
+
   updateHUD(data, i);
+}
+
+// ─────────────────────────────────────────────
+// Layer toggles (Ground track / Terminator / Staging markers)
+// ─────────────────────────────────────────────
+function toggleLayer(name, visible) {
+  layerVisible[name] = visible;
+  const idxMap = {
+    groundtrack: [window._groundTrackIdx, window._subSatIdx],
+    terminator:  [window._terminatorIdx],
+    staging:     [window._stagingIdx],
+  };
+  const idxs = (idxMap[name] || []).filter(i => i !== undefined);
+  if (idxs.length) Plotly.restyle("plot3d", { visible }, idxs);
 }
 
 // ─────────────────────────────────────────────
@@ -578,6 +841,10 @@ function updateHUD(data, i) {
       phase = "Parking orbit coast";
     } else if (s.needs_hohmann && t < s.t_coast_start) {
       phase = "Hohmann transfer coast";
+    } else if (s.t_maneuver !== null && s.t_maneuver !== undefined && t < s.t_maneuver) {
+      phase = "Circular orbit";
+    } else if (s.t_maneuver !== null && s.t_maneuver !== undefined) {
+      phase = "Post-maneuver orbit";
     } else {
       phase = "Circular orbit";
     }
@@ -596,6 +863,60 @@ function updateHUD(data, i) {
 
   const mass = data.mass ? data.mass[i] : 0;
   document.getElementById("hud-mass").textContent = (mass / 1000).toFixed(1) + " t";
+
+  // ── Propellant remaining (active stage) ──
+  const stageIdx = data.active_stage ? data.active_stage[i] : null;
+  const frac     = data.prop_frac ? data.prop_frac[i] : null;
+  const propEl   = document.getElementById("hud-propellant");
+  if (stageIdx === null || stageIdx === undefined || frac === null) {
+    // Coasting — no ascent stage burning, but the payload may still have
+    // OMS Δv left to spend on upcoming burns (circularization, Hohmann,
+    // second maneuver). Show that instead of a blank dash.
+    const burns = s.oms_burns || [];
+    const spent = burns.filter(b => b.t <= t).reduce((sum, b) => sum + b.dv, 0);
+    const remaining = (s.oms_dv_budget || 0) - spent;
+    if (s.oms_dv_budget) {
+      propEl.textContent = `OMS: ${remaining.toFixed(0)} / ${s.oms_dv_budget.toFixed(0)} m/s left`;
+    } else {
+      propEl.textContent = "—";
+    }
+  } else {
+    const totalKg     = s.stage_prop_masses_kg ? s.stage_prop_masses_kg[stageIdx] : null;
+    const remainingT  = totalKg !== null ? (frac * totalKg / 1000).toFixed(1) : null;
+    const totalT      = totalKg !== null ? (totalKg / 1000).toFixed(1) : null;
+    propEl.textContent = `Stage ${stageIdx + 1}: ${(frac * 100).toFixed(0)}%` +
+      (totalKg !== null ? ` (${remainingT} / ${totalT} t)` : "");
+  }
+
+  // ── Time to next event ──
+  const events = [];
+  const burnoutList = s.stage_burnouts || [];
+  burnoutList.forEach((tb, k) => {
+    const label = k < burnoutList.length - 1 ? `Stage ${k + 1} separation` : "MECO";
+    events.push([tb, label]);
+  });
+  if (s.t_apo !== null && s.t_apo !== undefined) events.push([s.t_apo, "Circularization burn"]);
+  if (s.needs_hohmann) {
+    if (s.t_park_end !== null) events.push([s.t_park_end, "Transfer injection burn"]);
+    if (s.t_coast_start !== null) events.push([s.t_coast_start, "Circularization at target"]);
+  }
+  if (s.t_maneuver !== null && s.t_maneuver !== undefined) {
+    events.push([s.t_maneuver, "Second maneuver burn"]);
+  }
+  events.sort((a, b) => a[0] - b[0]);
+  const next = events.find(([te]) => te > t);
+  const nextEl = document.getElementById("hud-next-event");
+  if (next) {
+    const dt = next[0] - t;
+    const label = dt >= 3600
+      ? `${next[1]} in ${(dt / 3600).toFixed(1)} h`
+      : dt >= 60
+        ? `${next[1]} in ${(dt / 60).toFixed(1)} min`
+        : `${next[1]} in ${dt.toFixed(0)} s`;
+    nextEl.textContent = label;
+  } else {
+    nextEl.textContent = "—";
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -626,6 +947,25 @@ function fillSummary(s) {
       ["Δv total",             s.transfer_dv_total.toFixed(0) + " m/s"],
       ["Transfer coast time",  s.transfer_time_min.toFixed(0) + " min"],
     );
+  }
+
+  summaryRows.push(
+    ["── OMS Δv budget ──",  ""],
+    ["Budget",               s.oms_dv_budget.toFixed(0) + " m/s"],
+    ["Spent (circ." + (s.needs_hohmann ? "+Hohmann" : "") + ")", s.oms_baseline_cost.toFixed(0) + " m/s"],
+  );
+  if (s.oms_over_budget) {
+    summaryRows.push(["⚠ Over budget", "insufficient for baseline burns"]);
+  }
+  if (s.t_maneuver !== null && s.t_maneuver !== undefined) {
+    summaryRows.push(
+      ["── Second maneuver ──", ""],
+      ["Δv requested",  s.maneuver_dv_requested.toFixed(0) + " m/s"],
+      ["Δv applied",    s.maneuver_dv_applied.toFixed(0) + " m/s"],
+    );
+    if (s.maneuver_limited) {
+      summaryRows.push(["⚠ Capped", "not enough OMS budget left"]);
+    }
   }
 
   const orbitalRows = [
