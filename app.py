@@ -74,7 +74,7 @@ def run():
 
     target_alt   = float(cfg["target_alt"])      # m
     n_orbits     = float(cfg.get("n_orbits", 1.5))
-    oms_dv_budget = float(cfg.get("oms_dv_budget", 2000))   # m/s — payload/upper-stage
+    oms_dv_budget = float(cfg.get("oms_dv_budget", 2500))   # m/s — payload/upper-stage
                                                              # maneuvering propellant budget
 
     guidance = PEGGuidance(
@@ -267,7 +267,7 @@ def run():
 
         elements_new = compute_orbital_elements(x_m, y_m, vx_new, vy_new)
         T_new        = elements_new["T"]
-        t_man_end    = t_maneuver + n_orbits * T_new
+        t_man_end    = t_maneuver + 0.5 * n_orbits * T_new
         t_man, y_man = run_coast([x_m, y_m, vx_new, vy_new], t_maneuver, t_man_end)
 
         t_full = np.concatenate([t_full, t_man])

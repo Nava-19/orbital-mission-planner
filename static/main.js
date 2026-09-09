@@ -151,6 +151,7 @@ function addStage() {
   container.insertAdjacentHTML("beforeend", stageCardHTML(stageCount, last));
   stageCount++;
   updateRemoveButtons();
+  renderFuelAssessment();
 }
 
 function removeStage(i) {
@@ -162,6 +163,7 @@ function removeStage(i) {
     remaining.push(readStageFromDOM(k));
   }
   renderStages(remaining);
+  renderFuelAssessment();
 }
 
 function readStageFromDOM(i) {
@@ -189,6 +191,7 @@ function selectRocketPreset(btn, key) {
   document.getElementById("vehicle-name").value = preset.name;
   document.getElementById("payload-mass").value = preset.payload;
   renderStages(preset.stages);
+  renderFuelAssessment();
 }
 
 // Initial render — Falcon 9 default stages
@@ -216,6 +219,111 @@ function showPanel(name) {
 // Orbit presets
 // ─────────────────────────────────────────────
 const V_CIRC = alt => Math.sqrt(Mu / (Re + alt * 1000)).toFixed(2);
+
+// Pre-flight estimate only: the full numerical trajectory is still the
+// authoritative validation. These allowances cover losses the ideal rocket
+// equation cannot model (drag, gravity turn and PEG insertion geometry).
+const G0 = 9.80665;
+const EARTH_ROTATION_SPEED = 465.1;
+const ASCENT_LOSS_ALLOWANCE = 1300; // m/s; calibrated to the simulator's PEG ascent model
+const OMS_CIRCULARIZATION_RESERVE = 2200; // m/s
+
+function idealDeltaV(stages, payloadKg, propellantScale = 1) {
+  let mass = payloadKg + stages.reduce(
+    (sum, s) => sum + s.dry + s.prop * propellantScale, 0
+  );
+  let dv = 0;
+  for (const stage of stages) {
+    const propellant = stage.prop * propellantScale;
+    const massAfterBurn = mass - propellant;
+    if (!(mass > massAfterBurn && massAfterBurn > 0 && stage.isp > 0)) return NaN;
+    dv += G0 * stage.isp * Math.log(mass / massAfterBurn);
+    mass = massAfterBurn - stage.dry;
+  }
+  return dv;
+}
+
+function hohmannDeltaV(fromAltM, toAltM) {
+  if (toAltM <= fromAltM) return 0;
+  const r1 = Re + fromAltM, r2 = Re + toAltM;
+  const dv1 = Math.sqrt(Mu / r1) * (Math.sqrt(2 * r2 / (r1 + r2)) - 1);
+  const dv2 = Math.sqrt(Mu / r2) * (1 - Math.sqrt(2 * r1 / (r1 + r2)));
+  return Math.abs(dv1) + Math.abs(dv2);
+}
+
+function fuelAssessment() {
+  const altKm = selectedOrbit.key === "custom"
+    ? parseFloat(document.getElementById("custom-alt").value) : selectedOrbit.alt;
+  const payloadKg = parseFloat(document.getElementById("payload-mass").value);
+  const omsBudget = parseFloat(document.getElementById("oms-dv-budget").value);
+  const stages = Array.from({ length: stageCount }, (_, i) => readStageFromDOM(i));
+  const numericStage = s => [s.dry, s.prop, s.thrust, s.cd, s.area]
+    .every(value => Number.isFinite(value) && value >= 0) && Number.isFinite(s.isp) && s.isp > 0;
+  if (!Number.isFinite(altKm) || altKm <= 0 || !Number.isFinite(payloadKg) || payloadKg < 0 ||
+      !Number.isFinite(omsBudget) || stages.some(s => !numericStage(s))) {
+    return { valid: false, reason: "Enter valid vehicle and orbit values to calculate fuel." };
+  }
+
+  // The backend ascends to a 250-km parking orbit, then uses a Hohmann
+  // transfer for high targets. Mirror that mission architecture here.
+  const targetM = altKm * 1000;
+  const parkingM = Math.min(targetM, 250e3);
+  const ascentRequired = Math.sqrt(Mu / (Re + parkingM)) - EARTH_ROTATION_SPEED + ASCENT_LOSS_ALLOWANCE;
+  const transferRequired = targetM > 2000e3 && targetM > parkingM * 2
+    ? hohmannDeltaV(parkingM, targetM) : 0;
+  const omsRequired = OMS_CIRCULARIZATION_RESERVE + transferRequired;
+  const availableDv = idealDeltaV(stages, payloadKg);
+
+  // Determine the minimum common loading factor while preserving the stage
+  // split selected by the user, rather than inventing a different vehicle.
+  let requiredScale = null;
+  if (Number.isFinite(availableDv)) {
+    let high = 1;
+    while (idealDeltaV(stages, payloadKg, high) < ascentRequired && high < 16) high *= 2;
+    if (idealDeltaV(stages, payloadKg, high) >= ascentRequired) {
+      let low = 0;
+      for (let j = 0; j < 40; j++) {
+        const mid = (low + high) / 2;
+        if (idealDeltaV(stages, payloadKg, mid) >= ascentRequired) high = mid;
+        else low = mid;
+      }
+      requiredScale = high;
+    }
+  }
+  const ascentOk = Number.isFinite(availableDv) && availableDv >= ascentRequired * 1.02;
+  const omsOk = omsBudget >= omsRequired;
+  return { valid: true, stages, ascentRequired, transferRequired, omsRequired, omsBudget,
+    availableDv, requiredScale, sufficient: ascentOk && omsOk };
+}
+
+function kg(value) { return Math.round(value).toLocaleString("en-US") + " kg"; }
+
+function renderFuelAssessment() {
+  const box = document.getElementById("fuel-estimate");
+  if (!box) return null;
+  const a = fuelAssessment();
+  if (!a.valid) {
+    box.className = "fuel-estimate warning";
+    box.textContent = a.reason;
+    return a;
+  }
+  const stageRows = a.requiredScale === null
+    ? "<li>The selected stack cannot provide the estimated ascent Δv.</li>"
+    : a.stages.map((s, i) => {
+        const needed = s.prop * a.requiredScale;
+        const delta = s.prop - needed;
+        return `<li>Stage ${i + 1}: ${kg(needed)} needed / ${kg(s.prop)} loaded` +
+          (delta >= 0 ? ` (${kg(delta)} reserve)` : ` (${kg(-delta)} short)`) + "</li>";
+      }).join("");
+  const sufficient = a.sufficient;
+  box.className = "fuel-estimate " + (sufficient ? "ok" : "warning");
+  box.innerHTML = `
+    <div class="fuel-status">${sufficient ? "Fuel budget looks sufficient" : "Insufficient fuel budget — launch blocked"}</div>
+    <div>Ascent Δv: <strong>${(a.ascentRequired / 1000).toFixed(2)} km/s required</strong> · ${(a.availableDv / 1000).toFixed(2)} km/s ideal capacity</div>
+    <ul class="fuel-stage-list">${stageRows}</ul>
+    <div>OMS: <strong>${Math.round(a.omsRequired).toLocaleString("en-US")} m/s required</strong> · ${Math.round(a.omsBudget).toLocaleString("en-US")} m/s configured${a.transferRequired ? " (includes transfer)" : ""}</div>`;
+  return a;
+}
 
 const ORBIT_LABELS = {
   iss:    "ISS — 400 km LEO",
@@ -245,6 +353,7 @@ function selectOrbit(btn, key, altKm) {
   document.getElementById("orbit-label").textContent = ORBIT_LABELS[key];
   document.getElementById("orbit-v").innerHTML =
     alt ? `v<sub>circ</sub> ≈ ${V_CIRC(alt)} km/s` : "—";
+  renderFuelAssessment();
 }
 
 document.getElementById("custom-alt").addEventListener("input", function () {
@@ -252,6 +361,15 @@ document.getElementById("custom-alt").addEventListener("input", function () {
   if (alt) document.getElementById("orbit-v").innerHTML =
     `v<sub>circ</sub> ≈ ${V_CIRC(alt)} km/s`;
 });
+
+// Recalculate while configuring, including dynamically-added stages.
+document.addEventListener("input", event => {
+  if (event.target.closest("#panel-config")) renderFuelAssessment();
+});
+document.addEventListener("change", event => {
+  if (event.target.closest("#panel-config")) renderFuelAssessment();
+});
+renderFuelAssessment();
 
 // ─────────────────────────────────────────────
 // Run simulation
@@ -264,6 +382,13 @@ async function runSimulation() {
   let altKm = selectedOrbit.key === "custom"
     ? parseFloat(document.getElementById("custom-alt").value)
     : selectedOrbit.alt;
+
+  const assessment = renderFuelAssessment();
+  if (!assessment || !assessment.valid || !assessment.sufficient) {
+    status.classList.remove("hidden");
+    msg.textContent = "Fuel warning: increase stage propellant or the OMS Δv budget before launching.";
+    return;
+  }
 
   console.log("Target orbit:", selectedOrbit.key, "| Alt:", altKm, "km |", altKm * 1000, "m");
 
@@ -468,12 +593,19 @@ function linspace(a, b, n) {
 // Earth-fixed longitude drifts — that drift is exactly what produces the
 // classic "sinusoidal" ground-track spiral.
 function groundPoint(X, Z, t) {
+  // NOTE: the rendered Earth mesh (earthSphere()) is static — its texture
+  // and vertex positions are built once and never rotated per frame. So
+  // "Earth-fixed" longitude here must stay in the SAME fixed inertial
+  // frame the globe is drawn in, or the sub-satellite point drifts away
+  // from the visible trajectory over time. (Subtracting omega_earth*t was
+  // the bug: it computed a real Earth-fixed longitude for a globe that
+  // never actually spins on screen.) TODO: to get the real spiraling
+  // ground-track effect back, rotate the Earth mesh itself by
+  // OMEGA_EARTH*t each frame and re-introduce the subtraction here so
+  // both stay consistent.
   const r = Math.hypot(X, Z) || 1;
   const latDeg = 90 - Math.acos(Math.max(-1, Math.min(1, Z / r))) * 180 / Math.PI;
-  const inertialLonDeg = X >= 0 ? 0 : 180;
-  const earthRotDeg = OMEGA_EARTH * t * 180 / Math.PI;
-  let lonDeg = inertialLonDeg - earthRotDeg;
-  lonDeg = ((lonDeg + 180) % 360 + 360) % 360 - 180; // wrap to [-180, 180]
+  const lonDeg = X >= 0 ? 0 : 180;
   return { lat: latDeg, lon: lonDeg };
 }
 
@@ -660,8 +792,16 @@ function buildPlot(data) {
 
   const orbitX = d.final_orbit_x || d.park_orbit_x || [];
   const orbitY = d.final_orbit_y || d.park_orbit_y || [];
-  const maxR = orbitX.length > 0
-    ? Math.max(...orbitX.map(Math.abs), ...orbitY.map(Math.abs)) * 1.3
+  // Include every orbit trace that might be drawn (target, transfer, and
+  // especially the post-maneuver orbit) when sizing the scene — otherwise
+  // the axis range gets fixed to whichever is smallest and anything
+  // bigger (e.g. a raised orbit after the second maneuver) gets clipped
+  // outside the box entirely, which looks like "nothing renders" no
+  // matter how far the camera zooms out.
+  const allX = [...orbitX, ...(d.transfer_x || []), ...(d.maneuver_x || [])];
+  const allY = [...orbitY, ...(d.transfer_y || []), ...(d.maneuver_y || [])];
+  const maxR = allX.length > 0
+    ? Math.max(...allX.map(Math.abs), ...allY.map(Math.abs)) * 1.3
     : Re * 1.8;
   const r = Math.max(maxR, Re * 1.5);
 

@@ -315,3 +315,18 @@ nav { display: flex; gap: 4px; }
   font-size: 11px; color: var(--text-dim); line-height: 1.5;
   margin: 10px 0 0;
 }
+
+/* ── Fuel feasibility ── */
+.fuel-estimate {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 12px; color: var(--text-dim);
+  font-size: 12px; line-height: 1.5;
+}
+.fuel-estimate.ok { border-color: rgba(102,187,106,0.6); }
+.fuel-estimate.warning { border-color: rgba(255,138,101,0.8); color: var(--text); }
+.fuel-estimate strong { color: var(--text); }
+.fuel-estimate .fuel-status { font-weight: 700; margin-bottom: 7px; }
+.fuel-estimate.ok .fuel-status { color: var(--green); }
+.fuel-estimate.warning .fuel-status { color: var(--orange); }
+.fuel-stage-list { margin: 7px 0 0 18px; }
+.fuel-stage-list li { margin: 2px 0; }

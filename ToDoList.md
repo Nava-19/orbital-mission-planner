@@ -87,3 +87,42 @@
 - [ ] Export mission report as PDF (trajectory plots + summary tables)
 - [ ] Multi-mission comparison view
 - [ ] Add atmospheric wind model affecting ascent trajectory
+
+---
+
+## Course-informed roadmap
+
+Ideas sourced from this year's coursework, roughly in order of relevance /
+effort to integrate with the existing architecture.
+
+### From SE (Sistemas Espaciales) — highest relevance
+- [ ] J2 perturbation on the coast phase (currently pure 2-body gravity) —
+      would produce realistic nodal precession, visible directly in the
+      ground track
+- [ ] ADCS basics: satellite attitude/orientation once in orbit
+      (magnetorquers, gravity-gradient stabilization) — currently the
+      vehicle has no attitude state post-insertion, this is new territory
+- [ ] Power subsystem budget: solar panel sizing vs. mission power
+      consumption, shown as a small mission-summary panel
+- [ ] Thermal subsystem (balance equation, passive/active control) —
+      more ambitious, fits a "long-duration mission" mode
+- [ ] Interplanetary patched-conic approximation — natural stepping stone
+      toward the already-planned TLI
+
+### From RL (Radiolocalització) — connects directly to today's ground track
+- [ ] Ground-station visibility windows (AOS/LOS, elevation angle) using
+      one or more fixed ground stations against the existing ground track
+      — low effort given the ground track math already exists
+- [ ] Communications link budget (Friis equation): EIRP, antenna gain,
+      SNR, Doppler shift during a pass — new HUD panel active only during
+      ground-station contact windows
+
+### From SASP (Sistemas Aéreos Sin Piloto) — lower relevance, UAV-focused
+- [ ] Export mission telemetry in MAVLink format (industry-standard) —
+      pairs with the already-planned PDF mission report export
+- [ ] IMU sensor noise model — only relevant if PEG guidance moves from
+      perfect-state assumption to simulated sensor imperfection
+
+### From RAIA — low relevance (AR/ML domain, not orbital)
+- [ ] Geolocated interactive map — weak overlap with the existing ground
+      track, not prioritized

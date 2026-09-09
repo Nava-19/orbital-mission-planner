@@ -59,7 +59,7 @@
         </div>
         <div class="field">
           <label>Payload OMS Δv budget (m/s)</label>
-          <input type="number" id="oms-dv-budget" value="2000" min="0" step="50">
+          <input type="number" id="oms-dv-budget" value="2500" min="0" step="50">
         </div>
       </section>
 
@@ -111,6 +111,17 @@
           <label>Orbits to show</label>
           <input type="number" id="n-orbits" value="1.5" step="0.5" min="0.5" max="5">
         </div>
+      </section>
+
+      <section class="card" id="fuel-card" aria-live="polite">
+        <h2>Fuel estimate</h2>
+        <div id="fuel-estimate" class="fuel-estimate">
+          Change the vehicle or target orbit to calculate the required propellant.
+        </div>
+        <p class="field-hint">
+          Preliminary rocket-equation estimate with conservative ascent and OMS reserves.
+          The numerical trajectory remains the final validation.
+        </p>
       </section>
 
       <!-- Second maneuver -->
