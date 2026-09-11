@@ -137,7 +137,9 @@ def run():
     # PHASE 3 — Decide: direct insertion or Hohmann transfer
     # ════════════════════════════════════════════
     parking_alt   = circ["alt_circular"]         # m — achieved circular orbit
-    needs_hohmann = target_alt > parking_alt * 2 and target_alt > 2000e3
+    # PEG always inserts into a low parking orbit; every materially different
+    # selected target therefore needs a transfer, including a 400-km LEO.
+    needs_hohmann = abs(target_alt - parking_alt) > 5e3
     transfer      = hohmann_transfer(parking_alt, target_alt) if needs_hohmann else None
     tr            = transfer  # always defined — None if no Hohmann
 
@@ -300,7 +302,7 @@ def run():
         # At the burn point, lower the opposite apsis to a 80-km perigee.
         # The user cannot accidentally choose a token burn that merely makes
         # an ellipse: this is the minimum retrograde Δv for atmospheric entry.
-        reentry_perigee = Re + 80e3
+        reentry_perigee = Re  # target an intersecting trajectory, not a shallow atmospheric skim
         wait_s = float(reentry.get("wait_min", 0)) * 60.0
         if wait_s > 0:
             t_wait, y_wait = run_coast(y_full[:, -1], t_full[-1], t_full[-1] + wait_s)
@@ -364,12 +366,16 @@ def run():
     # missions stay light and long ones (multi-orbit coasts, Hohmann
     # transfers) still render a smooth curve — capped for browser performance.
     T_total          = float(t_full[-1] - t_full[0])
-    FRAME_INTERVAL_S = 4.0      # target ~1 frame every 4 s of simulated time
+    FRAME_INTERVAL_S = 4.0      # long coasts stay light
     MIN_FRAMES       = 400
-    MAX_FRAMES       = 1200
+    MAX_FRAMES       = 1400
     n_frames = int(np.clip(T_total / FRAME_INTERVAL_S, MIN_FRAMES, MAX_FRAMES))
 
-    t_frames         = np.linspace(t_full[0], t_full[-1], n_frames)
+    # Ascents and the parking orbit need much denser points than multi-hour
+    # coasts; otherwise zooming reveals straight-line animation jumps.
+    t_coarse = np.linspace(t_full[0], t_full[-1], n_frames)
+    t_detail = np.arange(t_full[0], min(t_apo + T_orbit, t_full[-1]) + 0.25, 0.5)
+    t_frames = np.unique(np.concatenate([t_coarse, t_detail, [t_full[-1]]]))
     x_frames         = np.interp(t_frames, t_full, y_full[0])
     y_frames         = np.interp(t_frames, t_full, y_full[1])
     speed_frames     = np.interp(t_frames, t_full, tel["speed"])

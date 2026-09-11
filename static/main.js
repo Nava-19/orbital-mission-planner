@@ -262,7 +262,7 @@ function hohmannDeltaV(fromAltM, toAltM) {
 }
 
 function estimatedReentryDeltaV(altM) {
-  const r = Re + Math.max(altM, 80e3), rp = Re + 80e3;
+  const r = Re + Math.max(altM, 1), rp = Re;
   const vCircular = Math.sqrt(Mu / r);
   return Math.max(0, vCircular - Math.sqrt(Mu * (2 / r - 1 / ((r + rp) / 2))));
 }
@@ -323,6 +323,7 @@ function kg(value) { return Math.round(value).toLocaleString("en-US") + " kg"; }
 function renderFuelAssessment() {
   const box = document.getElementById("fuel-estimate");
   if (!box) return null;
+  updateVehicleMass();
   const a = fuelAssessment();
   if (!a.valid) {
     box.className = "fuel-estimate warning";
@@ -338,10 +339,8 @@ function renderFuelAssessment() {
           (delta >= 0 ? ` (${kg(delta)} reserve)` : ` (${kg(-delta)} short)`) + "</li>";
       }).join("");
   const sufficient = a.sufficient;
-  const totalMass = payloadKgForDisplay(a.stages);
-  document.getElementById("vehicle-mass").textContent = `Vehicle mass at liftoff: ${kg(totalMass)}`;
   const reentryOutput = document.getElementById("reentry-dv");
-  reentryOutput.textContent = `${Math.round(a.reentryDv).toLocaleString("en-US")} m/s (to 80 km perigee)`;
+  reentryOutput.textContent = `${Math.round(a.reentryDv).toLocaleString("en-US")} m/s (impact trajectory)`;
   const candidates = Object.entries(ROCKET_PRESETS).filter(([key, p]) => key !== selectedRocketKey &&
     idealDeltaV(p.stages, parseFloat(document.getElementById("payload-mass").value)) >= a.ascentRequired * 1.02).map(([, p]) => p.name);
   const recommendation = a.overCapacity.length || !sufficient
@@ -351,13 +350,22 @@ function renderFuelAssessment() {
     <div class="fuel-status">${sufficient ? "Fuel budget looks sufficient" : "Insufficient fuel budget — launch blocked"}</div>
     <div>Ascent Δv: <strong>${(a.ascentRequired / 1000).toFixed(2)} km/s required</strong> · ${(a.availableDv / 1000).toFixed(2)} km/s ideal capacity</div>
     <ul class="fuel-stage-list">${stageRows}</ul>
-    <div>OMS: <strong>${Math.round(a.omsRequired).toLocaleString("en-US")} m/s required</strong> · ${Math.round(a.omsBudget).toLocaleString("en-US")} m/s configured${a.maneuverDv || a.reentryDv ? " (includes selected burns)" : a.transferRequired ? " (includes transfer)" : ""}</div>${recommendation}`;
+    <div>OMS: <strong>${Math.round(a.omsRequired).toLocaleString("en-US")} m/s required</strong> · ${Math.round(a.omsBudget).toLocaleString("en-US")} m/s configured${a.maneuverDv || a.reentryDv ? " (includes selected burns)" : a.transferRequired ? " (includes transfer)" : ""}</div><button type="button" class="fuel-fill-btn" onclick="applyRequiredOms(${Math.ceil(a.omsRequired / 100) * 100})">Set required OMS Δv</button>${recommendation}`;
   return a;
 }
 
 function payloadKgForDisplay(stages) {
   return parseFloat(document.getElementById("payload-mass").value) + stages.reduce((sum, s) => sum + s.dry + s.prop, 0);
 }
+
+function updateVehicleMass() {
+  const stages = Array.from({ length: stageCount }, (_, i) => readStageFromDOM(i));
+  const payload = parseFloat(document.getElementById("payload-mass").value);
+  const mass = Number.isFinite(payload) ? payload + stages.reduce((sum, s) => sum + (Number.isFinite(s.dry) ? s.dry : 0) + (Number.isFinite(s.prop) ? s.prop : 0), 0) : 0;
+  document.getElementById("vehicle-mass").textContent = `Vehicle mass at liftoff: ${kg(mass)}`;
+}
+
+function applyRequiredOms(value) { document.getElementById("oms-dv-budget").value = value; renderFuelAssessment(); }
 
 const ORBIT_LABELS = {
   iss:    "ISS — 400 km LEO",
@@ -420,7 +428,7 @@ document.getElementById("custom-alt").addEventListener("input", function () {
 
 // Recalculate while configuring, including dynamically-added stages.
 document.addEventListener("input", event => {
-  if (event.target.closest("#panel-config")) renderFuelAssessment();
+  if (event.target.closest("#panel-config")) { updateVehicleMass(); renderFuelAssessment(); }
 });
 document.addEventListener("change", event => {
   if (event.target.closest("#panel-config")) renderFuelAssessment();
@@ -874,7 +882,7 @@ function buildPlot(data) {
       xaxis: { range: [-r, r], showgrid: false, zeroline: false, showticklabels: false, title: "" },
       yaxis: { range: [-r, r], showgrid: false, zeroline: false, showticklabels: false, title: "" },
       zaxis: { range: [-r, r], showgrid: false, zeroline: false, showticklabels: false, title: "" },
-      camera: { eye: { x: 1.8, y: 0.8, z: 0.6 }, up: { x: 0, y: 0, z: 1 } },
+      camera: { eye: { x: 0, y: 0, z: 2.4 }, up: { x: 0, y: 1, z: 0 } },
       aspectmode: "cube",
     },
     legend: {
