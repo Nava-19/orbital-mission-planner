@@ -807,12 +807,23 @@ function buildPlot(data) {
     hoverinfo: "skip",
   });
 
-  // Circularization burn marker
-  traces.push({
-    type: "scatter3d", mode: "markers",
-    x: [d.burn_x], y: [d.burn_y], z: [0],
-    marker: { color: "cyan", size: 6, symbol: "diamond" },
-    name: `Park. circ. burn  Δv = ${d.summary.delta_v_ms.toFixed(0)} m/s`,
+  // Δv burn markers — one per burn (circularization, Hohmann injection/
+  // circularization, second maneuver, deorbit), styled by whether each is
+  // prograde (speeds up, cyan upward triangle) or retrograde (slows down,
+  // orange-red downward triangle).
+  (d.burn_markers || []).forEach(b => {
+    const retro = !!b.retrograde;
+    traces.push({
+      type: "scatter3d", mode: "markers",
+      x: [b.x], y: [b.y], z: [0],
+      marker: {
+        color: retro ? "#ff5252" : "cyan",
+        size: 7,
+        symbol: retro ? "cross" : "diamond",
+      },
+      name: `${b.label}  Δv = ${b.dv >= 0 ? "+" : ""}${b.dv.toFixed(0)} m/s` +
+        (retro ? " (retrograde)" : ""),
+    });
   });
 
   // Launch marker

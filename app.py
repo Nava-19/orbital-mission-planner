@@ -348,6 +348,39 @@ def run():
     if t_reentry is not None and reentry_dv_applied > 0:
         oms_burns.append({"t": float(t_reentry), "dv": float(reentry_dv_applied), "label": "Deorbit burn"})
 
+    # Δv burn markers for the 3D view — position, magnitude, and whether
+    # each burn is prograde (speeds up, raises the opposite apsis) or
+    # retrograde (slows down, lowers it), so they can be drawn with
+    # distinct marker styles.
+    burn_markers = [{
+        "x": float(circ["x_apo"]), "y": float(circ["y_apo"]),
+        "dv": float(circ["delta_v"]), "label": "Circularization",
+        "retrograde": bool(circ["delta_v"] < 0),
+    }]
+    if needs_hohmann and tr is not None:
+        burn_markers.append({
+            "x": float(x_p), "y": float(y_p),
+            "dv": float(tr["dv1"]), "label": "Transfer injection",
+            "retrograde": bool(tr["dv1"] < 0),
+        })
+        burn_markers.append({
+            "x": float(x_ta), "y": float(y_ta),
+            "dv": float(tr["dv2"]), "label": "Circularization at target",
+            "retrograde": bool(tr["dv2"] < 0),
+        })
+    if t_maneuver is not None and abs(maneuver_dv_applied) > 0:
+        burn_markers.append({
+            "x": float(x_m), "y": float(y_m),
+            "dv": float(maneuver_dv_applied), "label": "Second maneuver",
+            "retrograde": bool(maneuver_dv_applied < 0),
+        })
+    if t_reentry is not None and reentry_dv_applied > 0:
+        burn_markers.append({
+            "x": float(x_r), "y": float(y_r),
+            "dv": float(-reentry_dv_applied), "label": "Deorbit burn",
+            "retrograde": True,
+        })
+
     # ════════════════════════════════════════════
     # Telemetry for full mission
     # ════════════════════════════════════════════
@@ -381,8 +414,18 @@ def run():
     # the TARGET orbit's period in the Hohmann branch (up to ~24h for GEO),
     # and using it here previously produced ~170k extra points, making the
     # simulation extremely slow / appear to hang.
-    T_park_for_detail = T_park if needs_hohmann else T_orbit
-    detail_end = min(t_apo + T_park_for_detail, t_full[-1])
+    #
+    # When a Hohmann transfer is involved, the detail window must cover all
+    # the way through the transfer coast (t_coast_start == t_trans_end) —
+    # not just one parking-orbit lap. The transfer burn happens at HALF a
+    # parking-orbit revolution (t_park_end = t_apo + 0.5*T_park), so a
+    # one-full-period detail window used to run out partway INTO the
+    # transfer ellipse, causing a visible sudden "speed up" right where the
+    # animation dropped from fine (5s) to coarse spacing mid-ellipse — even
+    # though the underlying telemetry (speed decreasing smoothly along the
+    # transfer) was always correct. Hohmann transfers are bounded by
+    # physics to at most a few hours, so this stays a safe point count.
+    detail_end = t_coast_start if needs_hohmann else min(t_apo + T_orbit, t_full[-1])
     t_detail = np.arange(t_full[0], detail_end + 5.0, 5.0)
     t_frames = np.unique(np.concatenate([t_coarse, t_detail, [t_full[-1]]]))
     x_frames         = np.interp(t_frames, t_full, y_full[0])
@@ -441,6 +484,7 @@ def run():
         "meco_x"   : float(x_f),
         "meco_y"   : float(y_f),
         "burn_x"   : float(circ["x_apo"]),
+        "burn_markers": burn_markers,
         "burn_y"   : float(circ["y_apo"]),
 
         "summary": {
