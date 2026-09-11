@@ -374,7 +374,16 @@ def run():
     # Ascents and the parking orbit need much denser points than multi-hour
     # coasts; otherwise zooming reveals straight-line animation jumps.
     t_coarse = np.linspace(t_full[0], t_full[-1], n_frames)
-    t_detail = np.arange(t_full[0], min(t_apo + T_orbit, t_full[-1]) + 0.25, 0.5)
+    # Fixed 5s spacing keeps playback speed visually proportional across the
+    # whole detail window (uniform dt => on-screen distance-per-frame scales
+    # directly with real speed, everywhere in this region). Must be bounded
+    # to the PARKING orbit's period, never the target orbit's: T_orbit is
+    # the TARGET orbit's period in the Hohmann branch (up to ~24h for GEO),
+    # and using it here previously produced ~170k extra points, making the
+    # simulation extremely slow / appear to hang.
+    T_park_for_detail = T_park if needs_hohmann else T_orbit
+    detail_end = min(t_apo + T_park_for_detail, t_full[-1])
+    t_detail = np.arange(t_full[0], detail_end + 5.0, 5.0)
     t_frames = np.unique(np.concatenate([t_coarse, t_detail, [t_full[-1]]]))
     x_frames         = np.interp(t_frames, t_full, y_full[0])
     y_frames         = np.interp(t_frames, t_full, y_full[1])

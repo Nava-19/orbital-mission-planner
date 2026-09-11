@@ -901,6 +901,7 @@ function buildControls(data) {
   bar.style.cssText = `
     position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
     display: flex; align-items: center; gap: 8px; z-index: 10;
+    flex-wrap: wrap; justify-content: center; max-width: 92vw;
     background: rgba(10,14,26,0.88); border: 1px solid rgba(255,255,255,0.12);
     border-radius: 10px; padding: 8px 14px; backdrop-filter: blur(4px);
   `;
@@ -911,7 +912,7 @@ function buildControls(data) {
     font-size: 12px; font-weight: 600; cursor: pointer; transition: background 0.15s;
   `;
 
-  [["▶ ×1", 1], ["▶ ×5", 5], ["▶ ×20", 20], ["▶ ×100", 100]].forEach(([label, spd]) => {
+  [["▶ ×1", 1], ["▶ ×5", 5], ["▶ ×20", 20], ["▶ ×50", 50], ["▶ ×100", 100], ["▶ ×150", 150], ["▶ ×200", 200]].forEach(([label, spd]) => {
     const b = document.createElement("button");
     b.textContent = label; b.style.cssText = btnStyle;
     b.onclick = () => { animSpeed = spd; startAnim(); };
