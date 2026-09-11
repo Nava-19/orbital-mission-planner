@@ -83,6 +83,10 @@
 - [ ] Visualize CFD results (pressure/velocity field) in the web interface
 
 ### General
+- [ ] Interactive orbital operations: once in the target orbit, hold indefinitely and
+      allow the user to pause and choose a generic maneuver, TLI, or reentry. Each
+      action must be preflighted against remaining OMS Δv and reserve enough Δv to
+      return to Earth orbit and execute a safe reentry.
 - [ ] Save/load mission configurations as JSON files
 - [ ] Export mission report as PDF (trajectory plots + summary tables)
 - [ ] Multi-mission comparison view

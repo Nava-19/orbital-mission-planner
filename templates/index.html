@@ -61,6 +61,7 @@
           <label>Payload OMS Δv budget (m/s)</label>
           <input type="number" id="oms-dv-budget" value="2500" min="0" step="50">
         </div>
+        <div class="vehicle-mass" id="vehicle-mass">Vehicle mass: —</div>
       </section>
 
       <!-- Dynamic stages -->
@@ -163,15 +164,15 @@
         <div id="reentry-fields" style="display:none">
           <div class="field-grid">
             <div class="field">
-              <label>Retrograde Δv (m/s)</label>
-              <input type="number" id="reentry-dv" value="120" min="1" step="10">
+              <label>Required retrograde Δv</label>
+              <output id="reentry-dv">Calculated from the current orbit</output>
             </div>
             <div class="field">
               <label>Wait before burn (min)</label>
               <input type="number" id="reentry-wait" value="0" min="0" step="1">
             </div>
           </div>
-          <p class="field-hint">Point-mass ballistic reentry with atmospheric drag. It uses the remaining OMS Δv after all previous burns.</p>
+          <p class="field-hint">The simulator automatically targets an 80 km perigee, then propagates a ballistic atmospheric reentry. It uses the remaining OMS Δv.</p>
         </div>
       </section>
 

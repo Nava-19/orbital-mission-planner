@@ -66,13 +66,20 @@ const ROCKET_PRESETS = {
   },
 };
 
+// The loaded values above are the maximum usable propellant capacities for
+// the simplified stage model. Keep a separate immutable limit when users edit.
+Object.values(ROCKET_PRESETS).forEach(preset => preset.stages.forEach(stage => {
+  stage.maxProp = stage.prop;
+}));
+let selectedRocketKey = "falcon9";
+
 let stageCount = 0; // number of currently rendered stages, assigned by renderStages()
 
 // ─────────────────────────────────────────────
 // Dynamic stage cards
 // ─────────────────────────────────────────────
 function stageCardHTML(i, s) {
-  s = s || { dry: 20000, prop: 100000, thrust: 1000000, isp: 300, cd: 0.3, area: 10.52, propellant: "rp1lox" };
+  s = s || { dry: 20000, prop: 100000, thrust: 1000000, isp: 300, cd: 0.3, area: 10.52, propellant: "rp1lox", maxProp: null };
   const propOptions = Object.keys(PROPELLANT_ISP).map(key =>
     `<option value="${key}" ${key === s.propellant ? "selected" : ""}>${PROPELLANT_ISP[key].label}</option>`
   ).join("");
@@ -90,7 +97,8 @@ function stageCardHTML(i, s) {
         </div>
         <div class="field">
           <label>Propellant mass (kg)</label>
-          <input type="number" id="s${i}-prop" value="${s.prop}" min="0">
+          <input type="number" id="s${i}-prop" value="${s.prop}" min="0" ${s.maxProp ? `max="${s.maxProp}"` : ""}>
+          <small>${s.maxProp ? `Real capacity max: ${s.maxProp.toLocaleString("en-US")} kg` : "Custom stage: no real capacity limit"}</small>
         </div>
         <div class="field">
           <label>Thrust (N)</label>
@@ -175,6 +183,7 @@ function readStageFromDOM(i) {
     cd        : parseFloat(document.getElementById(`s${i}-cd`).value),
     area      : parseFloat(document.getElementById(`s${i}-area`).value),
     propellant: document.getElementById(`s${i}-propellant`).value,
+    maxProp   : Number(document.getElementById(`s${i}-prop`).max) || null,
   };
 }
 
@@ -185,7 +194,8 @@ function selectRocketPreset(btn, key) {
   document.querySelectorAll(".rocket-preset-btn").forEach(b => b.classList.remove("active"));
   btn.classList.add("active");
 
-  if (key === "custom") return; // keep current configuration as-is
+  selectedRocketKey = key;
+  if (key === "custom") { renderFuelAssessment(); return; }
 
   const preset = ROCKET_PRESETS[key];
   document.getElementById("vehicle-name").value = preset.name;
@@ -251,6 +261,12 @@ function hohmannDeltaV(fromAltM, toAltM) {
   return Math.abs(dv1) + Math.abs(dv2);
 }
 
+function estimatedReentryDeltaV(altM) {
+  const r = Re + Math.max(altM, 80e3), rp = Re + 80e3;
+  const vCircular = Math.sqrt(Mu / r);
+  return Math.max(0, vCircular - Math.sqrt(Mu * (2 / r - 1 / ((r + rp) / 2))));
+}
+
 function fuelAssessment() {
   const altKm = selectedOrbit.key === "custom"
     ? parseFloat(document.getElementById("custom-alt").value) : selectedOrbit.alt;
@@ -259,7 +275,7 @@ function fuelAssessment() {
   const maneuverDv = document.getElementById("maneuver-enabled").checked
     ? Math.abs(parseFloat(document.getElementById("maneuver-dv").value)) : 0;
   const reentryDv = document.getElementById("reentry-enabled").checked
-    ? Math.abs(parseFloat(document.getElementById("reentry-dv").value)) : 0;
+    ? estimatedReentryDeltaV(altKm * 1000) : 0;
   const stages = Array.from({ length: stageCount }, (_, i) => readStageFromDOM(i));
   const numericStage = s => [s.dry, s.prop, s.thrust, s.cd, s.area]
     .every(value => Number.isFinite(value) && value >= 0) && Number.isFinite(s.isp) && s.isp > 0;
@@ -278,6 +294,7 @@ function fuelAssessment() {
     ? hohmannDeltaV(parkingM, targetM) : 0;
   const omsRequired = OMS_CIRCULARIZATION_RESERVE + transferRequired + maneuverDv + reentryDv;
   const availableDv = idealDeltaV(stages, payloadKg);
+  const overCapacity = stages.filter(s => s.maxProp && s.prop > s.maxProp + 1e-6);
 
   // Determine the minimum common loading factor while preserving the stage
   // split selected by the user, rather than inventing a different vehicle.
@@ -295,9 +312,9 @@ function fuelAssessment() {
       requiredScale = high;
     }
   }
-  const ascentOk = Number.isFinite(availableDv) && availableDv >= ascentRequired * 1.02;
+  const ascentOk = Number.isFinite(availableDv) && availableDv >= ascentRequired * 1.02 && !overCapacity.length;
   const omsOk = omsBudget >= omsRequired;
-  return { valid: true, stages, ascentRequired, transferRequired, maneuverDv, reentryDv, omsRequired, omsBudget,
+  return { valid: true, stages, ascentRequired, transferRequired, maneuverDv, reentryDv, omsRequired, omsBudget, overCapacity,
     availableDv, requiredScale, sufficient: ascentOk && omsOk };
 }
 
@@ -321,13 +338,25 @@ function renderFuelAssessment() {
           (delta >= 0 ? ` (${kg(delta)} reserve)` : ` (${kg(-delta)} short)`) + "</li>";
       }).join("");
   const sufficient = a.sufficient;
+  const totalMass = payloadKgForDisplay(a.stages);
+  document.getElementById("vehicle-mass").textContent = `Vehicle mass at liftoff: ${kg(totalMass)}`;
+  const reentryOutput = document.getElementById("reentry-dv");
+  reentryOutput.textContent = `${Math.round(a.reentryDv).toLocaleString("en-US")} m/s (to 80 km perigee)`;
+  const candidates = Object.entries(ROCKET_PRESETS).filter(([key, p]) => key !== selectedRocketKey &&
+    idealDeltaV(p.stages, parseFloat(document.getElementById("payload-mass").value)) >= a.ascentRequired * 1.02).map(([, p]) => p.name);
+  const recommendation = a.overCapacity.length || !sufficient
+    ? `<div>Recommended higher-capacity presets: <strong>${candidates.join(", ") || "none for this payload"}</strong></div>` : "";
   box.className = "fuel-estimate " + (sufficient ? "ok" : "warning");
   box.innerHTML = `
     <div class="fuel-status">${sufficient ? "Fuel budget looks sufficient" : "Insufficient fuel budget — launch blocked"}</div>
     <div>Ascent Δv: <strong>${(a.ascentRequired / 1000).toFixed(2)} km/s required</strong> · ${(a.availableDv / 1000).toFixed(2)} km/s ideal capacity</div>
     <ul class="fuel-stage-list">${stageRows}</ul>
-    <div>OMS: <strong>${Math.round(a.omsRequired).toLocaleString("en-US")} m/s required</strong> · ${Math.round(a.omsBudget).toLocaleString("en-US")} m/s configured${a.maneuverDv || a.reentryDv ? " (includes selected burns)" : a.transferRequired ? " (includes transfer)" : ""}</div>`;
+    <div>OMS: <strong>${Math.round(a.omsRequired).toLocaleString("en-US")} m/s required</strong> · ${Math.round(a.omsBudget).toLocaleString("en-US")} m/s configured${a.maneuverDv || a.reentryDv ? " (includes selected burns)" : a.transferRequired ? " (includes transfer)" : ""}</div>${recommendation}`;
   return a;
+}
+
+function payloadKgForDisplay(stages) {
+  return parseFloat(document.getElementById("payload-mass").value) + stages.reduce((sum, s) => sum + s.dry + s.prop, 0);
 }
 
 const ORBIT_LABELS = {
@@ -445,7 +474,7 @@ async function runSimulation() {
     },
     reentry: {
       enabled : document.getElementById("reentry-enabled").checked,
-      delta_v : document.getElementById("reentry-dv").value,
+      delta_v : 0, // calculated authoritatively by the backend from orbital state
       wait_min: document.getElementById("reentry-wait").value,
     },
   };

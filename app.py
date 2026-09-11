@@ -76,6 +76,11 @@ def run():
     n_orbits     = float(cfg.get("n_orbits", 1.5))
     oms_dv_budget = float(cfg.get("oms_dv_budget", 2500))   # m/s — payload/upper-stage
                                                              # maneuvering propellant budget
+    maneuver_cfg = cfg.get("second_maneuver") or {}
+    reentry_cfg  = cfg.get("reentry") or {}
+    # The requested display-orbit count belongs only to the last stable
+    # orbit. Any enabled post-orbit burn starts immediately after insertion.
+    final_orbit_count = n_orbits if not (maneuver_cfg.get("enabled") or reentry_cfg.get("enabled")) else 0.0
 
     guidance = PEGGuidance(
         t_vertical      = float(np.clip(float(cfg.get("t_vertical", 20)), 5, 30)),
@@ -164,8 +169,11 @@ def run():
         tx2   = -y_ta / r_ta;  ty2 = x_ta / r_ta
         state_tgt = [x_ta, y_ta, v_tgt * tx2, v_tgt * ty2]
         T_tgt     = 2 * np.pi * np.sqrt(r_ta**3 / Mu)
-        t_tgt_end = t_trans_end + n_orbits * T_tgt
-        t_tgt, y_tgt = run_coast(state_tgt, t_trans_end, t_tgt_end)
+        t_tgt_end = t_trans_end + final_orbit_count * T_tgt
+        if final_orbit_count:
+            t_tgt, y_tgt = run_coast(state_tgt, t_trans_end, t_tgt_end)
+        else:
+            t_tgt, y_tgt = np.array([t_trans_end]), np.array(state_tgt, dtype=float).reshape(4, 1)
 
         t_full = np.concatenate([t_asc, t_to_apo, t_park, t_trans, t_tgt])
         y_full = np.hstack([y_asc, y_to_apo, y_park, y_trans, y_tgt])
@@ -188,8 +196,11 @@ def run():
         # Direct insertion — coast parking orbit for n_orbits
         state_circ  = state_at_apoapsis(circ)
         T_orbit     = circ["elements_final"]["T"]
-        t_orb_end   = t_apo + n_orbits * T_orbit
-        t_orbit, y_orbit = run_coast(state_circ, t_apo, t_orb_end)
+        t_orb_end   = t_apo + final_orbit_count * T_orbit
+        if final_orbit_count:
+            t_orbit, y_orbit = run_coast(state_circ, t_apo, t_orb_end)
+        else:
+            t_orbit, y_orbit = np.array([t_apo]), np.array(state_circ, dtype=float).reshape(4, 1)
 
         t_full = np.concatenate([t_asc, t_to_apo, t_orbit])
         y_full = np.hstack([y_asc, y_to_apo, y_orbit])
@@ -227,7 +238,7 @@ def run():
     # rather than special-cased to Hohmann, since reentry (a retrograde
     # burn) and a future Trans-Lunar Injection (a large prograde burn) are
     # both just specific applications of the same mechanism.
-    maneuver = cfg.get("second_maneuver")
+    maneuver = maneuver_cfg
     x_maneuver_orb = y_maneuver_orb = []
     t_maneuver = None
     maneuver_dv_requested = 0.0
@@ -280,20 +291,17 @@ def run():
     # ════════════════════════════════════════════
     # PHASE 5 — Optional deorbit burn and ballistic reentry
     # ════════════════════════════════════════════
-    reentry = cfg.get("reentry")
+    reentry = reentry_cfg
     t_reentry = None
     reentry_dv_requested = 0.0
     reentry_dv_applied = 0.0
     reentry_impacted = False
     if reentry and reentry.get("enabled"):
-        reentry_dv_requested = abs(float(reentry.get("delta_v", 120)))
+        # At the burn point, lower the opposite apsis to a 80-km perigee.
+        # The user cannot accidentally choose a token burn that merely makes
+        # an ellipse: this is the minimum retrograde Δv for atmospheric entry.
+        reentry_perigee = Re + 80e3
         wait_s = float(reentry.get("wait_min", 0)) * 60.0
-        # The reentry follows all preceding OMS burns, so it can only spend
-        # what the payload still has after circularization and maneuvering.
-        already_spent = oms_baseline_cost + abs(maneuver_dv_applied)
-        remaining = max(0.0, oms_dv_budget - already_spent)
-        reentry_dv_applied = min(reentry_dv_requested, remaining)
-
         if wait_s > 0:
             t_wait, y_wait = run_coast(y_full[:, -1], t_full[-1], t_full[-1] + wait_s)
             t_full = np.concatenate([t_full, t_wait])
@@ -302,6 +310,15 @@ def run():
         t_reentry = float(t_full[-1])
         x_r, y_r, vx_r, vy_r = y_full[:, -1]
         speed = np.hypot(vx_r, vy_r)
+        r_r = np.hypot(x_r, y_r)
+        a_deorbit = 0.5 * (r_r + reentry_perigee)
+        target_speed = np.sqrt(Mu * (2.0 / r_r - 1.0 / a_deorbit))
+        reentry_dv_requested = max(0.0, speed - target_speed)
+        # The reentry follows all preceding OMS burns, so it can only spend
+        # what remains after circularization and maneuvering.
+        already_spent = oms_baseline_cost + abs(maneuver_dv_applied)
+        remaining = max(0.0, oms_dv_budget - already_spent)
+        reentry_dv_applied = min(reentry_dv_requested, remaining)
         # A positive UI value means retrograde: remove speed while retaining
         # the current velocity direction.
         scale = max(0.0, speed - reentry_dv_applied) / speed if speed > 0 else 1.0
