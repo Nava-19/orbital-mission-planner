@@ -256,11 +256,16 @@ function fuelAssessment() {
     ? parseFloat(document.getElementById("custom-alt").value) : selectedOrbit.alt;
   const payloadKg = parseFloat(document.getElementById("payload-mass").value);
   const omsBudget = parseFloat(document.getElementById("oms-dv-budget").value);
+  const maneuverDv = document.getElementById("maneuver-enabled").checked
+    ? Math.abs(parseFloat(document.getElementById("maneuver-dv").value)) : 0;
+  const reentryDv = document.getElementById("reentry-enabled").checked
+    ? Math.abs(parseFloat(document.getElementById("reentry-dv").value)) : 0;
   const stages = Array.from({ length: stageCount }, (_, i) => readStageFromDOM(i));
   const numericStage = s => [s.dry, s.prop, s.thrust, s.cd, s.area]
     .every(value => Number.isFinite(value) && value >= 0) && Number.isFinite(s.isp) && s.isp > 0;
   if (!Number.isFinite(altKm) || altKm <= 0 || !Number.isFinite(payloadKg) || payloadKg < 0 ||
-      !Number.isFinite(omsBudget) || stages.some(s => !numericStage(s))) {
+      !Number.isFinite(omsBudget) || !Number.isFinite(maneuverDv) || !Number.isFinite(reentryDv) ||
+      stages.some(s => !numericStage(s))) {
     return { valid: false, reason: "Enter valid vehicle and orbit values to calculate fuel." };
   }
 
@@ -271,7 +276,7 @@ function fuelAssessment() {
   const ascentRequired = Math.sqrt(Mu / (Re + parkingM)) - EARTH_ROTATION_SPEED + ASCENT_LOSS_ALLOWANCE;
   const transferRequired = targetM > 2000e3 && targetM > parkingM * 2
     ? hohmannDeltaV(parkingM, targetM) : 0;
-  const omsRequired = OMS_CIRCULARIZATION_RESERVE + transferRequired;
+  const omsRequired = OMS_CIRCULARIZATION_RESERVE + transferRequired + maneuverDv + reentryDv;
   const availableDv = idealDeltaV(stages, payloadKg);
 
   // Determine the minimum common loading factor while preserving the stage
@@ -292,7 +297,7 @@ function fuelAssessment() {
   }
   const ascentOk = Number.isFinite(availableDv) && availableDv >= ascentRequired * 1.02;
   const omsOk = omsBudget >= omsRequired;
-  return { valid: true, stages, ascentRequired, transferRequired, omsRequired, omsBudget,
+  return { valid: true, stages, ascentRequired, transferRequired, maneuverDv, reentryDv, omsRequired, omsBudget,
     availableDv, requiredScale, sufficient: ascentOk && omsOk };
 }
 
@@ -321,7 +326,7 @@ function renderFuelAssessment() {
     <div class="fuel-status">${sufficient ? "Fuel budget looks sufficient" : "Insufficient fuel budget — launch blocked"}</div>
     <div>Ascent Δv: <strong>${(a.ascentRequired / 1000).toFixed(2)} km/s required</strong> · ${(a.availableDv / 1000).toFixed(2)} km/s ideal capacity</div>
     <ul class="fuel-stage-list">${stageRows}</ul>
-    <div>OMS: <strong>${Math.round(a.omsRequired).toLocaleString("en-US")} m/s required</strong> · ${Math.round(a.omsBudget).toLocaleString("en-US")} m/s configured${a.transferRequired ? " (includes transfer)" : ""}</div>`;
+    <div>OMS: <strong>${Math.round(a.omsRequired).toLocaleString("en-US")} m/s required</strong> · ${Math.round(a.omsBudget).toLocaleString("en-US")} m/s configured${a.maneuverDv || a.reentryDv ? " (includes selected burns)" : a.transferRequired ? " (includes transfer)" : ""}</div>`;
   return a;
 }
 
@@ -336,6 +341,28 @@ const ORBIT_LABELS = {
 function toggleManeuverFields() {
   const enabled = document.getElementById("maneuver-enabled").checked;
   document.getElementById("maneuver-fields").style.display = enabled ? "block" : "none";
+  renderFuelAssessment();
+}
+
+function toggleReentryFields() {
+  const enabled = document.getElementById("reentry-enabled").checked;
+  document.getElementById("reentry-fields").style.display = enabled ? "block" : "none";
+  renderFuelAssessment();
+}
+
+function showFuelWarning(assessment) {
+  const modal = document.getElementById("fuel-modal");
+  const ascent = assessment && Number.isFinite(assessment.availableDv)
+    ? `The vehicle provides ${(assessment.availableDv / 1000).toFixed(2)} km/s of ideal Δv, while ${(assessment.ascentRequired / 1000).toFixed(2)} km/s is required.`
+    : "Some vehicle values are invalid.";
+  const oms = assessment && assessment.valid
+    ? ` The OMS budget is ${Math.round(assessment.omsBudget)} m/s; this mission needs ${Math.round(assessment.omsRequired)} m/s.` : "";
+  document.getElementById("fuel-modal-message").textContent = `${ascent}${oms} Increase propellant or OMS Δv, then try again.`;
+  modal.classList.remove("hidden");
+}
+
+function closeFuelWarning() {
+  document.getElementById("fuel-modal").classList.add("hidden");
 }
 
 function selectOrbit(btn, key, altKm) {
@@ -385,8 +412,7 @@ async function runSimulation() {
 
   const assessment = renderFuelAssessment();
   if (!assessment || !assessment.valid || !assessment.sufficient) {
-    status.classList.remove("hidden");
-    msg.textContent = "Fuel warning: increase stage propellant or the OMS Δv budget before launching.";
+    showFuelWarning(assessment);
     return;
   }
 
@@ -416,6 +442,11 @@ async function runSimulation() {
       enabled : document.getElementById("maneuver-enabled").checked,
       delta_v : document.getElementById("maneuver-dv").value,
       wait_min: document.getElementById("maneuver-wait").value,
+    },
+    reentry: {
+      enabled : document.getElementById("reentry-enabled").checked,
+      delta_v : document.getElementById("reentry-dv").value,
+      wait_min: document.getElementById("reentry-wait").value,
     },
   };
 
@@ -983,6 +1014,8 @@ function updateHUD(data, i) {
       phase = "Hohmann transfer coast";
     } else if (s.t_maneuver !== null && s.t_maneuver !== undefined && t < s.t_maneuver) {
       phase = "Circular orbit";
+    } else if (s.t_reentry !== null && s.t_reentry !== undefined && t >= s.t_reentry) {
+      phase = "Atmospheric reentry";
     } else if (s.t_maneuver !== null && s.t_maneuver !== undefined) {
       phase = "Post-maneuver orbit";
     } else {
@@ -1042,6 +1075,9 @@ function updateHUD(data, i) {
   }
   if (s.t_maneuver !== null && s.t_maneuver !== undefined) {
     events.push([s.t_maneuver, "Second maneuver burn"]);
+  }
+  if (s.t_reentry !== null && s.t_reentry !== undefined) {
+    events.push([s.t_reentry, "Deorbit burn"]);
   }
   events.sort((a, b) => a[0] - b[0]);
   const next = events.find(([te]) => te > t);
@@ -1106,6 +1142,14 @@ function fillSummary(s) {
     if (s.maneuver_limited) {
       summaryRows.push(["⚠ Capped", "not enough OMS budget left"]);
     }
+  }
+  if (s.t_reentry !== null && s.t_reentry !== undefined) {
+    summaryRows.push(
+      ["── Reentry ──", ""],
+      ["Deorbit Δv", s.reentry_dv_applied.toFixed(0) + " / " + s.reentry_dv_requested.toFixed(0) + " m/s"],
+      ["Outcome", s.reentry_impacted ? "surface reached" : "atmospheric pass not completed"],
+    );
+    if (s.reentry_limited) summaryRows.push(["⚠ Deorbit capped", "not enough OMS budget left"]);
   }
 
   const orbitalRows = [

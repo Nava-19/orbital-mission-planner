@@ -27,8 +27,8 @@
 ## Medium Priority
 
 ### Orbital mechanics
-- [ ] Second delta-V maneuver — raise/lower orbit after insertion
-- [ ] Reentry burn — deorbit and reentry trajectory
+- [x] Second delta-V maneuver — raise/lower orbit after insertion
+- [x] Reentry burn — deorbit and ballistic atmospheric trajectory
 - [ ] Trans-Lunar Injection (TLI) — burn to lunar transfer orbit
 - [ ] Real-time apoapsis/periapsis display in HUD (computed from current state)
 

@@ -330,3 +330,21 @@ nav { display: flex; gap: 4px; }
 .fuel-estimate.warning .fuel-status { color: var(--orange); }
 .fuel-stage-list { margin: 7px 0 0 18px; }
 .fuel-stage-list li { margin: 2px 0; }
+
+/* ── Preflight warning modal ── */
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 1000; display: flex;
+  align-items: center; justify-content: center; padding: 20px;
+  background: rgba(0, 0, 0, 0.68); backdrop-filter: blur(3px);
+}
+.modal-backdrop.hidden { display: none; }
+.modal-card {
+  width: min(440px, 100%); background: var(--surface); border: 1px solid var(--orange);
+  border-radius: var(--radius); padding: 24px; box-shadow: 0 20px 60px rgba(0,0,0,.45);
+}
+.modal-card h2 { color: var(--orange); font-size: 16px; margin-bottom: 12px; }
+.modal-card p { color: var(--text); line-height: 1.5; margin-bottom: 18px; }
+.modal-close-btn {
+  width: 100%; border: 0; border-radius: 7px; padding: 10px; cursor: pointer;
+  font-weight: 700; color: var(--bg); background: var(--orange);
+}

@@ -146,7 +146,9 @@ def get_telemetry(t_all, y_all, rocket):
     dt   = np.diff(t_all)
     dv   = np.diff(speed)
     # Avoid division by zero, pad with 0 at start
-    accel_ms2 = np.concatenate([[0], np.where(dt > 0, dv / dt, 0)])
+    # np.where evaluates both branches, so using it here still emitted a
+    # divide-by-zero warning at phase boundaries with duplicated timestamps.
+    accel_ms2 = np.concatenate([[0], np.divide(dv, dt, out=np.zeros_like(dv), where=dt > 0)])
     accel_g   = accel_ms2 / 9.80665       # Convert m/s² to g
 
     return {
@@ -191,3 +193,40 @@ def run_coast(state0, t_start, t_end, dt=10.0):
     )
 
     return solution.t, solution.y
+
+
+def run_reentry(state0, t_start, t_end, mass, Cd=1.2, A=10.0, dt=1.0):
+    """Propagate an unpowered payload through the atmosphere after deorbit.
+
+    Unlike ``run_coast``, this retains atmospheric drag (with the atmosphere
+    co-rotating with Earth) and stops at the surface.  It is deliberately a
+    point-mass, ballistic reentry model: heating, lift and parachutes are
+    outside this simulator's current scope.
+    """
+    def reentry_dynamics(t, state):
+        x, y, vx, vy = state
+        r = np.hypot(x, y)
+        r_hat = np.array([x, y]) / r
+        t_hat = np.array([-y, x]) / r
+        gravity = -get_gravity(max(r - Re, 0.0)) * r_hat
+
+        v_vec = np.array([vx, vy])
+        v_atm = omega * r * t_hat
+        v_rel = v_vec - v_atm
+        v_rel_mag = np.linalg.norm(v_rel)
+        rho = get_air_density(max(r - Re, 0.0))
+        drag = 0.5 * rho * v_rel_mag**2 * Cd * A
+        drag_vec = (-drag / max(mass, 1.0)) * (v_rel / v_rel_mag) if v_rel_mag > 0 else np.zeros(2)
+        acceleration = gravity + drag_vec
+        return [vx, vy, acceleration[0], acceleration[1]]
+
+    def impact(t, state):
+        return np.hypot(state[0], state[1]) - Re
+    impact.terminal = True
+    impact.direction = -1
+
+    solution = solve_ivp(
+        fun=reentry_dynamics, t_span=(t_start, t_end), y0=state0,
+        events=impact, method="RK45", max_step=dt, dense_output=True,
+    )
+    return solution.t, solution.y, bool(solution.t_events[0].size)

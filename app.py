@@ -3,7 +3,7 @@ from flask import Flask, render_template, request, jsonify
 
 from constants   import Mu, Re
 from vehicle     import Rocket, Stage, PEGGuidance
-from solver      import run_simulation, get_telemetry, run_coast
+from solver      import run_simulation, get_telemetry, run_coast, run_reentry
 from orbital     import compute_orbital_elements, circularize, state_at_apoapsis, propagate_orbit, hohmann_transfer
 from environment import v_circular
 
@@ -267,13 +267,53 @@ def run():
 
         elements_new = compute_orbital_elements(x_m, y_m, vx_new, vy_new)
         T_new        = elements_new["T"]
-        t_man_end    = t_maneuver + 0.5 * n_orbits * T_new
+        # Show the same number of complete post-burn orbits requested in the
+        # configuration.  The previous 0.5 multiplier truncated this phase.
+        t_man_end    = t_maneuver + n_orbits * T_new
         t_man, y_man = run_coast([x_m, y_m, vx_new, vy_new], t_maneuver, t_man_end)
 
         t_full = np.concatenate([t_full, t_man])
         y_full = np.hstack([y_full, y_man])
 
         x_maneuver_orb, y_maneuver_orb = propagate_orbit(elements_new)
+
+    # ════════════════════════════════════════════
+    # PHASE 5 — Optional deorbit burn and ballistic reentry
+    # ════════════════════════════════════════════
+    reentry = cfg.get("reentry")
+    t_reentry = None
+    reentry_dv_requested = 0.0
+    reentry_dv_applied = 0.0
+    reentry_impacted = False
+    if reentry and reentry.get("enabled"):
+        reentry_dv_requested = abs(float(reentry.get("delta_v", 120)))
+        wait_s = float(reentry.get("wait_min", 0)) * 60.0
+        # The reentry follows all preceding OMS burns, so it can only spend
+        # what the payload still has after circularization and maneuvering.
+        already_spent = oms_baseline_cost + abs(maneuver_dv_applied)
+        remaining = max(0.0, oms_dv_budget - already_spent)
+        reentry_dv_applied = min(reentry_dv_requested, remaining)
+
+        if wait_s > 0:
+            t_wait, y_wait = run_coast(y_full[:, -1], t_full[-1], t_full[-1] + wait_s)
+            t_full = np.concatenate([t_full, t_wait])
+            y_full = np.hstack([y_full, y_wait])
+
+        t_reentry = float(t_full[-1])
+        x_r, y_r, vx_r, vy_r = y_full[:, -1]
+        speed = np.hypot(vx_r, vy_r)
+        # A positive UI value means retrograde: remove speed while retaining
+        # the current velocity direction.
+        scale = max(0.0, speed - reentry_dv_applied) / speed if speed > 0 else 1.0
+        state_deorbit = [x_r, y_r, vx_r * scale, vy_r * scale]
+        elements_deorbit = compute_orbital_elements(*state_deorbit)
+        coast_limit = t_reentry + max(7200.0, 2.0 * elements_deorbit["T"])
+        t_re, y_re, reentry_impacted = run_reentry(
+            state_deorbit, t_reentry, coast_limit,
+            mass=rocket.payload_mass, Cd=1.2, A=max(1.0, stages[-1].A * 0.25),
+        )
+        t_full = np.concatenate([t_full, t_re])
+        y_full = np.hstack([y_full, y_re])
 
     # List of every OMS burn that happens, in order, with when it happens —
     # lets the frontend compute "how much OMS budget is left" at any point
@@ -286,6 +326,8 @@ def run():
         oms_burns.append({"t": float(t_coast_start), "dv": float(abs(tr["dv2"])), "label": "Circularization at target"})
     if t_maneuver is not None and abs(maneuver_dv_applied) > 0:
         oms_burns.append({"t": float(t_maneuver), "dv": float(abs(maneuver_dv_applied)), "label": "Second maneuver"})
+    if t_reentry is not None and reentry_dv_applied > 0:
+        oms_burns.append({"t": float(t_reentry), "dv": float(reentry_dv_applied), "label": "Deorbit burn"})
 
     # ════════════════════════════════════════════
     # Telemetry for full mission
@@ -383,6 +425,11 @@ def run():
             "t_apo"         : float(t_apo),
             "t_park_end"    : float(t_park_end) if needs_hohmann else None,
             "t_maneuver"    : t_maneuver,
+            "t_reentry"     : t_reentry,
+            "reentry_dv_requested": float(reentry_dv_requested),
+            "reentry_dv_applied": float(reentry_dv_applied),
+            "reentry_limited": bool(reentry_dv_applied < reentry_dv_requested - 1e-6),
+            "reentry_impacted": bool(reentry_impacted),
             "t_coast_start" : float(t_coast_start),
             "max_alt_km"    : float(tel["altitude"].max() / 1000),
             "max_speed_kms" : float(tel["speed"].max() / 1000),
