@@ -655,26 +655,11 @@ function linspace(a, b, n) {
 // ─────────────────────────────────────────────
 // Ground track — sub-satellite point projected onto the rotating Earth
 // ─────────────────────────────────────────────
-// The flight is simulated in a single fixed inertial plane (Plotly x/z,
-// with y always 0), i.e. an orbital plane containing the polar axis. As
-// Earth spins underneath that fixed plane, the sub-satellite point's
-// Earth-fixed longitude drifts — that drift is exactly what produces the
-// classic "sinusoidal" ground-track spiral.
-function groundPoint(X, Z, t) {
-  // NOTE: the rendered Earth mesh (earthSphere()) is static — its texture
-  // and vertex positions are built once and never rotated per frame. So
-  // "Earth-fixed" longitude here must stay in the SAME fixed inertial
-  // frame the globe is drawn in, or the sub-satellite point drifts away
-  // from the visible trajectory over time. (Subtracting omega_earth*t was
-  // the bug: it computed a real Earth-fixed longitude for a globe that
-  // never actually spins on screen.) TODO: to get the real spiraling
-  // ground-track effect back, rotate the Earth mesh itself by
-  // OMEGA_EARTH*t each frame and re-introduce the subtraction here so
-  // both stay consistent.
-  const r = Math.hypot(X, Z) || 1;
-  const latDeg = 90 - Math.acos(Math.max(-1, Math.min(1, Z / r))) * 180 / Math.PI;
-  const lonDeg = X >= 0 ? 0 : 180;
-  return { lat: latDeg, lon: lonDeg };
+// Physics and rendering both use the geocentric convention: X–Y is the
+// equatorial plane and Z points north. The current 2D solver therefore
+// produces an equatorial ground track (inclination is a future 3D feature).
+function groundPoint(X, Y, t) {
+  return { lat: 0, lon: Math.atan2(Y, X) * 180 / Math.PI };
 }
 
 function latLonToXYZ(latDeg, lonDeg, r) {
@@ -767,7 +752,7 @@ function buildPlot(data) {
   // Ghost trajectory
   traces.push({
     type: "scatter3d", mode: "lines",
-    x: d.x, y: d.x.map(_ => 0), z: d.y,
+    x: d.x, y: d.y, z: d.x.map(_ => 0),
     line: { color: "rgba(255,200,100,0.1)", width: 2 },
     hoverinfo: "skip", showlegend: false,
   });
@@ -775,7 +760,7 @@ function buildPlot(data) {
   // Ascent transfer ellipse
   traces.push({
     type: "scatter3d", mode: "lines",
-    x: d.ellipse_x, y: d.ellipse_x.map(_ => 0), z: d.ellipse_y,
+    x: d.ellipse_x, y: d.ellipse_y, z: d.ellipse_x.map(_ => 0),
     line: { color: "magenta", width: 2, dash: "dash" },
     name: "Ascent ellipse", hoverinfo: "skip",
   });
@@ -784,7 +769,7 @@ function buildPlot(data) {
   if (d.needs_hohmann && d.park_orbit_x && d.park_orbit_x.length > 0) {
     traces.push({
       type: "scatter3d", mode: "lines",
-      x: d.park_orbit_x, y: d.park_orbit_x.map(_ => 0), z: d.park_orbit_y,
+      x: d.park_orbit_x, y: d.park_orbit_y, z: d.park_orbit_x.map(_ => 0),
       line: { color: "deepskyblue", width: 2, dash: "dash" },
       name: `Parking orbit (${d.summary.park_alt_km.toFixed(0)} km)`,
       hoverinfo: "skip",
@@ -795,7 +780,7 @@ function buildPlot(data) {
   if (d.needs_hohmann && d.transfer_x && d.transfer_x.length > 0) {
     traces.push({
       type: "scatter3d", mode: "lines",
-      x: d.transfer_x, y: d.transfer_x.map(_ => 0), z: d.transfer_y,
+      x: d.transfer_x, y: d.transfer_y, z: d.transfer_x.map(_ => 0),
       line: { color: "gold", width: 2, dash: "dot" },
       name: `Hohmann transfer ellipse`,
       hoverinfo: "skip",
@@ -806,7 +791,7 @@ function buildPlot(data) {
   if (d.maneuver_x && d.maneuver_x.length > 0) {
     traces.push({
       type: "scatter3d", mode: "lines",
-      x: d.maneuver_x, y: d.maneuver_x.map(_ => 0), z: d.maneuver_y,
+      x: d.maneuver_x, y: d.maneuver_y, z: d.maneuver_x.map(_ => 0),
       line: { color: "magenta", width: 2, dash: "dash" },
       name: `Post-maneuver orbit`,
       hoverinfo: "skip",
@@ -816,7 +801,7 @@ function buildPlot(data) {
   // Final target orbit
   traces.push({
     type: "scatter3d", mode: "lines",
-    x: d.final_orbit_x, y: d.final_orbit_x.map(_ => 0), z: d.final_orbit_y,
+    x: d.final_orbit_x, y: d.final_orbit_y, z: d.final_orbit_x.map(_ => 0),
     line: { color: "limegreen", width: 3 },
     name: `Target orbit (${d.summary.target_alt_km.toFixed(0)} km)`,
     hoverinfo: "skip",
@@ -825,7 +810,7 @@ function buildPlot(data) {
   // Circularization burn marker
   traces.push({
     type: "scatter3d", mode: "markers",
-    x: [d.burn_x], y: [0], z: [d.burn_y],
+    x: [d.burn_x], y: [d.burn_y], z: [0],
     marker: { color: "cyan", size: 6, symbol: "diamond" },
     name: `Park. circ. burn  Δv = ${d.summary.delta_v_ms.toFixed(0)} m/s`,
   });
@@ -833,7 +818,7 @@ function buildPlot(data) {
   // Launch marker
   traces.push({
     type: "scatter3d", mode: "markers",
-    x: [d.launch_x], y: [0], z: [d.launch_y],
+    x: [d.launch_x], y: [d.launch_y], z: [0],
     marker: { color: "lime", size: 6 },
     name: "Launch",
   });
@@ -841,7 +826,7 @@ function buildPlot(data) {
   // Dynamic trajectory
   traces.push({
     type: "scatter3d", mode: "lines",
-    x: [d.x[0]], y: [0], z: [d.y[0]],
+    x: [d.x[0]], y: [d.y[0]], z: [0],
     line: { color: "darkorange", width: 4 },
     name: "Trajectory", hoverinfo: "skip",
   });
@@ -849,7 +834,7 @@ function buildPlot(data) {
   // Rocket marker
   traces.push({
     type: "scatter3d", mode: "markers",
-    x: [d.x[0]], y: [0], z: [d.y[0]],
+    x: [d.x[0]], y: [d.y[0]], z: [0],
     marker: { color: "white", size: 9, symbol: "circle",
               line: { color: "darkorange", width: 2 } },
     name: "Rocket", hoverinfo: "skip",
@@ -882,6 +867,7 @@ function buildPlot(data) {
       xaxis: { range: [-r, r], showgrid: false, zeroline: false, showticklabels: false, title: "" },
       yaxis: { range: [-r, r], showgrid: false, zeroline: false, showticklabels: false, title: "" },
       zaxis: { range: [-r, r], showgrid: false, zeroline: false, showticklabels: false, title: "" },
+      // X–Y is the equatorial orbital plane; Z is north.
       camera: { eye: { x: 0, y: 0, z: 2.4 }, up: { x: 0, y: 1, z: 0 } },
       aspectmode: "cube",
     },
@@ -981,14 +967,14 @@ function stopAnim() {
 function updateFrame(data, i) {
   Plotly.restyle("plot3d", {
     x: [data.x.slice(0, i + 1)],
-    y: [data.x.slice(0, i + 1).map(_ => 0)],
-    z: [data.y.slice(0, i + 1)],
+    y: [data.y.slice(0, i + 1)],
+    z: [data.x.slice(0, i + 1).map(_ => 0)],
   }, [window._trajIdx]);
 
   Plotly.restyle("plot3d", {
     x: [[data.x[i]]],
-    y: [[0]],
-    z: [[data.y[i]]],
+    y: [[data.y[i]]],
+    z: [[0]],
   }, [window._rocketIdx]);
 
   // Ground track + sub-satellite point, kept in sync with the trajectory
