@@ -2,6 +2,7 @@ import numpy as np
 from scipy.integrate import solve_ivp
 from environment import get_gravity, get_air_density
 from constants import Re, v_rot, omega
+from orbital import moon_gravity_accel
 
 def equations_of_motion(t, state, rocket):
     x, y, vx, vy = state
@@ -16,6 +17,12 @@ def equations_of_motion(t, state, rocket):
     # --- 1. Gravity ---
     g     = get_gravity(altitude)
     g_vec = -g * r_hat
+
+    # --- 1b. Moon's gravity — negligible this close to Earth (drowned out
+    # by Earth's own pull by several orders of magnitude during ascent),
+    # but included for consistency; it's what actually matters far out
+    # during a translunar coast (see run_coast below).
+    am_x, am_y = moon_gravity_accel(x, y, t)
 
     # --- 2. Thrust ---
     thrust     = rocket.get_thrust(t, altitude)
@@ -34,7 +41,7 @@ def equations_of_motion(t, state, rocket):
     drag_vec = (-drag / mass) * (v_rel / v_rel_mag) if v_rel_mag > 0 else np.zeros(2)
 
     # --- Total acceleration ---
-    a = g_vec + thrust_vec + drag_vec
+    a = g_vec + thrust_vec + drag_vec + np.array([am_x, am_y])
 
     return [vx, vy, a[0], a[1]]
 
@@ -181,7 +188,8 @@ def run_coast(state0, t_start, t_end, dt=10.0):
         g     = get_gravity(r - Re)
         r_hat = np.array([x, y]) / r
         g_vec = -g * r_hat
-        return [vx, vy, g_vec[0], g_vec[1]]
+        am_x, am_y = moon_gravity_accel(x, y, t)
+        return [vx, vy, g_vec[0] + am_x, g_vec[1] + am_y]
 
     solution = solve_ivp(
         fun          = gravity_only,
@@ -209,6 +217,7 @@ def run_reentry(state0, t_start, t_end, mass, Cd=1.2, A=10.0, dt=1.0):
         r_hat = np.array([x, y]) / r
         t_hat = np.array([-y, x]) / r
         gravity = -get_gravity(max(r - Re, 0.0)) * r_hat
+        am_x, am_y = moon_gravity_accel(x, y, t)
 
         v_vec = np.array([vx, vy])
         v_atm = omega * r * t_hat
@@ -217,7 +226,7 @@ def run_reentry(state0, t_start, t_end, mass, Cd=1.2, A=10.0, dt=1.0):
         rho = get_air_density(max(r - Re, 0.0))
         drag = 0.5 * rho * v_rel_mag**2 * Cd * A
         drag_vec = (-drag / max(mass, 1.0)) * (v_rel / v_rel_mag) if v_rel_mag > 0 else np.zeros(2)
-        acceleration = gravity + drag_vec
+        acceleration = gravity + drag_vec + np.array([am_x, am_y])
         return [vx, vy, acceleration[0], acceleration[1]]
 
     def impact(t, state):

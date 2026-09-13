@@ -18,3 +18,9 @@ Htr  = 11000        # m        - Tropopause altitude
 # --- Orbital ---
 Mu   = 3.986004418e14  # m³/s² - Standard gravitational parameter (G*Me)
 Vsoi = 11186           # m/s   - Earth's escape velocity
+
+# --- Moon (simplified circular orbit — see orbital.get_moon_position) ---
+Mmoon      = 7.342e22        # kg    - Moon's mass
+MuMoon     = G * Mmoon       # m³/s² - Moon's standard gravitational parameter (~4.9048e12)
+MoonOrbitR = 384400e3        # m     - Moon's mean orbital radius (semi-major axis)
+MoonPeriod = 27.321661 * 86400  # s  - Moon's sidereal orbital period (~27.32 days)

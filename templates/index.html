@@ -127,12 +127,15 @@
 
       <!-- Second maneuver -->
       <section class="card">
-        <h2>
-          <label class="toggle-label">
-            <input type="checkbox" id="maneuver-enabled" onchange="toggleManeuverFields()">
-            Second maneuver
-          </label>
-        </h2>
+        <h2>Post-insertion maneuver</h2>
+        <div class="field">
+          <label>Mode</label>
+          <select id="maneuver-mode" onchange="toggleManeuverFields()">
+            <option value="none">None</option>
+            <option value="raise_lower">Raise / lower orbit</option>
+            <option value="tli">Trans-Lunar Injection (TLI)</option>
+          </select>
+        </div>
         <div id="maneuver-fields" style="display:none">
           <div class="field-grid">
             <div class="field">
@@ -151,7 +154,28 @@
             isn't enough left).
           </p>
         </div>
+        <div id="tli-fields" style="display:none">
+          <div class="field-grid">
+            <div class="field">
+              <label>Target apoapsis (km)</label>
+              <input type="number" id="tli-target-apoapsis" value="384400" min="0" step="1000">
+            </div>
+            <div class="field">
+              <label>Wait before burn (min)</label>
+              <input type="number" id="tli-wait" value="10" min="0" step="1">
+            </div>
+          </div>
+          <p class="field-hint">
+            Δv is computed automatically for the target apoapsis (defaults
+            to the Moon's mean distance, 384,400 km) — same OMS budget as
+            above, capped if there isn't enough left. This models the
+            Earth-centered translunar transfer trajectory and transit time
+            only — lunar gravity, sphere-of-influence patching, and lunar
+            orbit insertion aren't simulated.
+          </p>
+        </div>
       </section>
+
 
       <!-- Reentry -->
       <section class="card">

@@ -1,10 +1,10 @@
 import numpy as np
 from flask import Flask, render_template, request, jsonify
 
-from constants   import Mu, Re
+from constants   import Mu, Re, MoonOrbitR, MuMoon, MoonPeriod
 from vehicle     import Rocket, Stage, PEGGuidance
 from solver      import run_simulation, get_telemetry, run_coast, run_reentry
-from orbital     import compute_orbital_elements, circularize, state_at_apoapsis, propagate_orbit, hohmann_transfer
+from orbital     import compute_orbital_elements, circularize, state_at_apoapsis, propagate_orbit, hohmann_transfer, get_moon_position, get_moon_velocity, set_moon_phase
 from environment import v_circular
 
 app = Flask(__name__)
@@ -78,9 +78,12 @@ def run():
                                                              # maneuvering propellant budget
     maneuver_cfg = cfg.get("second_maneuver") or {}
     reentry_cfg  = cfg.get("reentry") or {}
+    tli_cfg      = cfg.get("tli") or {}
     # The requested display-orbit count belongs only to the last stable
     # orbit. Any enabled post-orbit burn starts immediately after insertion.
-    final_orbit_count = n_orbits if not (maneuver_cfg.get("enabled") or reentry_cfg.get("enabled")) else 0.0
+    final_orbit_count = n_orbits if not (
+        maneuver_cfg.get("enabled") or reentry_cfg.get("enabled") or tli_cfg.get("enabled")
+    ) else 0.5
 
     guidance = PEGGuidance(
         t_vertical      = float(np.clip(float(cfg.get("t_vertical", 20)), 5, 30)),
@@ -93,6 +96,9 @@ def run():
     )
 
     print(f"Target: {target_alt/1000:.0f} km | t_end: {rocket.timeline[-1][2]*1.2:.0f}s")
+    print(f"  second_maneuver.enabled={maneuver_cfg.get('enabled')}  "
+          f"tli.enabled={tli_cfg.get('enabled')} (target_apoapsis_km={tli_cfg.get('target_apoapsis_km')})  "
+          f"reentry.enabled={reentry_cfg.get('enabled')}  oms_dv_budget={oms_dv_budget}")
 
     # ════════════════════════════════════════════
     # PHASE 1 — Powered ascent
@@ -291,42 +297,311 @@ def run():
         x_maneuver_orb, y_maneuver_orb = propagate_orbit(elements_new)
 
     # ════════════════════════════════════════════
+    # PHASE 4b — Optional Trans-Lunar Injection (TLI)
+    # ════════════════════════════════════════════
+    # A prograde burn toward a target apoapsis (defaulting to the Moon's
+    # mean distance, 384,400 km), synced so the Moon is ACTUALLY there when
+    # the spacecraft arrives (set_moon_phase — otherwise the trajectory
+    # reaches the right distance at the wrong time, and the Moon is nowhere
+    # nearby), followed by a lunar orbit insertion (LOI) burn, 1.5 orbits
+    # around the Moon, and a trans-Earth injection (TEI) burn heading back.
+    x_tli_orb = y_tli_orb = []
+    t_tli = None
+    tli_dv_requested = 0.0
+    tli_dv_applied = 0.0
+    tli_transit_days = None
+    t_loi = None
+    loi_dv_requested = 0.0
+    loi_dv_applied = 0.0
+    t_tei = None
+    tei_dv_requested = 0.0
+    tei_dv_applied = 0.0
+    lunar_orbit_alt_km = None
+    if tli_cfg and tli_cfg.get("enabled"):
+        target_apoapsis_km = float(tli_cfg.get("target_apoapsis_km", 384400))
+        wait_s = float(tli_cfg.get("wait_min", 0)) * 60.0
+
+        if wait_s > 0:
+            state_pre = y_full[:, -1]
+            t_wait, y_wait = run_coast(state_pre, t_full[-1], t_full[-1] + wait_s)
+            t_full = np.concatenate([t_full, t_wait])
+            y_full = np.hstack([y_full, y_wait])
+
+        t_tli = float(t_full[-1])
+        x_t, y_t, vx_t, vy_t = y_full[:, -1]
+        r_current = np.hypot(x_t, y_t)
+        r_target  = Re + target_apoapsis_km * 1000.0
+        v_mag_t   = np.hypot(vx_t, vy_t)
+
+        a_transfer   = 0.5 * (r_current + r_target)
+        v_circ_here  = np.sqrt(Mu / r_current)
+        v_transfer   = np.sqrt(Mu * (2.0 / r_current - 1.0 / a_transfer))
+        tli_dv_requested = max(0.0, v_transfer - v_circ_here)
+
+        already_spent_tli = oms_baseline_cost + abs(maneuver_dv_applied)
+        oms_remaining_tli = max(0.0, oms_dv_budget - already_spent_tli)
+        tli_dv_applied = min(tli_dv_requested, oms_remaining_tli)
+
+        scale_t = (v_mag_t + tli_dv_applied) / v_mag_t if v_mag_t > 0 else 1.0
+        vx_tli, vy_tli = vx_t * scale_t, vy_t * scale_t
+
+        elements_tli = compute_orbital_elements(x_t, y_t, vx_tli, vy_tli)
+        T_tli = elements_tli["T"]
+        t_tli_end = t_tli + 0.5 * T_tli
+        tli_transit_days = float(0.5 * T_tli / 86400.0)
+
+        # Sync the Moon's phase so it's actually at the transfer ellipse's
+        # apoapsis when the spacecraft gets there. For a prograde burn from
+        # a near-circular orbit, the burn point becomes the new ellipse's
+        # PERIAPSIS, so apoapsis sits at burn_angle + 180°.
+        apoapsis_angle = np.arctan2(y_t, x_t) + np.pi
+        moon_angle_unphased = 2 * np.pi * (t_tli_end / MoonPeriod)
+        phase0 = apoapsis_angle - moon_angle_unphased
+        set_moon_phase(phase0)
+
+        t_tr, y_tr2 = run_coast([x_t, y_t, vx_tli, vy_tli], t_tli, t_tli_end)
+        t_full = np.concatenate([t_full, t_tr])
+        y_full = np.hstack([y_full, y_tr2])
+
+        x_tli_orb, y_tli_orb = propagate_orbit(elements_tli)
+
+        # ── Lunar Orbit Insertion (LOI) ──
+        # Whatever the real closest-approach distance turns out to be (this
+        # simplified patched-two-body model can't precisely target a
+        # specific altitude the way real mission planning does), circularize
+        # there — same math as every other circularization burn in this
+        # app, just relative to the MOON's gravity and motion instead of
+        # Earth's.
+        t_loi = float(t_full[-1])
+        x_a, y_a, vx_a, vy_a = y_full[:, -1]
+        xm, ym = get_moon_position(t_loi)
+        vxm, vym = get_moon_velocity(t_loi)
+        dx, dy   = x_a - xm, y_a - ym
+        dvx, dvy = vx_a - vxm, vy_a - vym
+        r_rel     = np.hypot(dx, dy)
+        speed_rel = np.hypot(dvx, dvy)
+        lunar_orbit_alt_km = float(r_rel / 1000.0)   # informational — Moon radius not modeled as a body to collide with
+
+        v_circ_moon = np.sqrt(MuMoon / r_rel) if r_rel > 0 else 0.0
+        loi_dv_requested = max(0.0, speed_rel - v_circ_moon)
+        already_spent_loi = already_spent_tli + tli_dv_applied
+        remaining_loi = max(0.0, oms_dv_budget - already_spent_loi)
+        loi_dv_applied = min(loi_dv_requested, remaining_loi)
+
+        scale_loi = (speed_rel - loi_dv_applied) / speed_rel if speed_rel > 0 else 1.0
+        new_dvx, new_dvy = dvx * scale_loi, dvy * scale_loi
+        y_full[2, -1] = vxm + new_dvx
+        y_full[3, -1] = vym + new_dvy
+
+        # ── Coast 1.5 orbits around the Moon ──
+        T_lunar = 2 * np.pi * np.sqrt(r_rel**3 / MuMoon) if r_rel > 0 else 0.0
+        t_lunar_end = t_loi + 1.5 * T_lunar
+        t_lo, y_lo = run_coast(y_full[:, -1], t_loi, t_lunar_end)
+        t_full = np.concatenate([t_full, t_lo])
+        y_full = np.hstack([y_full, y_lo])
+
+        # ── Trans-Earth Injection (TEI) ──
+        # Symmetric with LOI in spirit (burn relative to the Moon), but
+        # targeting a modest margin ABOVE local escape velocity so the
+        # spacecraft actually breaks free of the Moon's gravity well and
+        # heads back out, rather than just loosening the current orbit.
+        t_tei = float(t_full[-1])
+        x_b, y_b, vx_b, vy_b = y_full[:, -1]
+        xm2, ym2 = get_moon_position(t_tei)
+        vxm2, vym2 = get_moon_velocity(t_tei)
+        dxb, dyb   = x_b - xm2, y_b - ym2
+        dvxb, dvyb = vx_b - vxm2, vy_b - vym2
+        r_rel2     = np.hypot(dxb, dyb)
+        speed_rel2 = np.hypot(dvxb, dvyb)
+
+        v_escape_moon = np.sqrt(2.0 * MuMoon / r_rel2) if r_rel2 > 0 else 0.0
+        v_tei_target  = v_escape_moon * 1.05   # 5% margin over parabolic escape
+        tei_dv_requested = max(0.0, v_tei_target - speed_rel2)
+        already_spent_tei = already_spent_loi + loi_dv_applied
+        remaining_tei = max(0.0, oms_dv_budget - already_spent_tei)
+        tei_dv_applied = min(tei_dv_requested, remaining_tei)
+
+        scale_tei = (speed_rel2 + tei_dv_applied) / speed_rel2 if speed_rel2 > 0 else 1.0
+        new_dvxb, new_dvyb = dvxb * scale_tei, dvyb * scale_tei
+        y_full[2, -1] = vxm2 + new_dvxb
+        y_full[3, -1] = vym2 + new_dvyb
+
+        # ── Coast back toward Earth ──
+        # A full, precisely-targeted Earth-return trajectory (aiming for a
+        # specific safe reentry corridor) is a much harder targeting problem
+        # than this simplified patched-two-body model attempts — this just
+        # coasts under real Earth+Moon gravity for roughly the same duration
+        # as the outbound transit, showing a physically genuine (if not
+        # precisely aimed) return leg.
+        t_return_end = t_tei + 0.5 * T_tli
+        t_ret, y_ret = run_coast(y_full[:, -1], t_tei, t_return_end)
+        t_full = np.concatenate([t_full, t_ret])
+        y_full = np.hstack([y_full, y_ret])
+
+    # ════════════════════════════════════════════
     # PHASE 5 — Optional deorbit burn and ballistic reentry
     # ════════════════════════════════════════════
     reentry = reentry_cfg
-    t_reentry = None
+    t_descent_burn = None        # time of the optional "return to parking orbit" burn
+    t_reentry_circ = None        # time of the optional circularization-at-parking burn
+    t_reentry = None             # time of the actual atmosphere-targeting deorbit burn
+    reentry_descent_dv = 0.0
+    reentry_circ_dv = 0.0
+    dv_descent_requested = 0.0
+    dv_circ_requested = 0.0
     reentry_dv_requested = 0.0
     reentry_dv_applied = 0.0
     reentry_impacted = False
     if reentry and reentry.get("enabled"):
-        # At the burn point, lower the opposite apsis to a 80-km perigee.
-        # The user cannot accidentally choose a token burn that merely makes
-        # an ellipse: this is the minimum retrograde Δv for atmospheric entry.
-        reentry_perigee = Re  # target an intersecting trajectory, not a shallow atmospheric skim
         wait_s = float(reentry.get("wait_min", 0)) * 60.0
         if wait_s > 0:
             t_wait, y_wait = run_coast(y_full[:, -1], t_full[-1], t_full[-1] + wait_s)
             t_full = np.concatenate([t_full, t_wait])
             y_full = np.hstack([y_full, y_wait])
 
-        t_reentry = float(t_full[-1])
+        already_spent = oms_baseline_cost + abs(maneuver_dv_applied) + tli_dv_applied + loi_dv_applied + tei_dv_applied
+        x_h, y_h, vx_h, vy_h = y_full[:, -1]
+        r_high = np.hypot(x_h, y_h)
+        r_park_target = Re + circ["alt_circular"]
+
+        # Reserve a chunk of whatever OMS budget is left for the ACTUAL
+        # deorbit burn before spending anything on the return-to-parking
+        # sequence below. 250 m/s comfortably covers a real deorbit burn
+        # from a circular LEO-ish parking orbit.
+        DEORBIT_RESERVE = 250.0
+        return_budget = max(0.0, oms_dv_budget - already_spent - DEORBIT_RESERVE)
+
+        # A single burn straight down to the surface from well above the
+        # parking orbit (e.g. after a Hohmann transfer to MEO/GEO, or a
+        # second maneuver that raised the orbit) would enter the atmosphere
+        # at an extremely high, unrealistic speed — the vis-viva speed for
+        # a direct fall from that altitude is far higher than a real
+        # deorbit's ~7.5-8 km/s entry interface. Real deorbits from well
+        # above LEO first return to a low parking-type orbit, THEN perform
+        # the actual (much smaller) atmospheric entry burn from there.
+        needs_return_trip = r_high > 1.5 * r_park_target
+        dv_descent_requested = 0.0
+        if needs_return_trip:
+            speed_h = np.hypot(vx_h, vy_h)
+            a_descent = 0.5 * (r_high + r_park_target)
+            v_descent = np.sqrt(Mu * (2.0 / r_high - 1.0 / a_descent))
+            dv_descent_requested = max(0.0, speed_h - v_descent)
+
+        # Only actually ATTEMPT the two-burn return (descend, then
+        # circularize) if the budget covers at least the descent burn in
+        # full. Committing to it on a smaller budget used to silently apply
+        # 0 m/s to both burns — leaving the vehicle exactly where it
+        # started, at the ORIGINAL high orbit — while the code still acted
+        # as if it were back at the parking orbit for the final "deorbit"
+        # burn afterward. That burn was then computed (correctly, for
+        # wherever the vehicle actually was) as a huge GEO-direct-to-surface
+        # Δv, of which only a tiny sliver could be afforded — nowhere near
+        # enough to bring perigee down, so it just coasted for a lap and
+        # stopped without ever reentering. Falling back to a single
+        # best-effort burn (below) at least puts 100% of what's available
+        # toward lowering perigee as much as possible from wherever the
+        # vehicle really is.
+        if needs_return_trip and return_budget >= dv_descent_requested:
+            # Burn 1 — drop periapsis down to the parking-orbit altitude.
+            t_descent_burn = float(t_full[-1])
+            speed_h = np.hypot(vx_h, vy_h)
+            dv_descent_applied = dv_descent_requested   # fully affordable, per the check above
+            return_budget -= dv_descent_applied
+            already_spent += dv_descent_applied
+            reentry_descent_dv = dv_descent_applied
+
+            scale = max(0.0, speed_h - dv_descent_applied) / speed_h if speed_h > 0 else 1.0
+            vx_d, vy_d = vx_h * scale, vy_h * scale
+
+            elements_descent = compute_orbital_elements(x_h, y_h, vx_d, vy_d)
+            T_descent   = elements_descent["T"]
+            t_desc_end  = t_descent_burn + 0.5 * T_descent
+            t_desc, y_desc = run_coast([x_h, y_h, vx_d, vy_d], t_descent_burn, t_desc_end)
+            t_full = np.concatenate([t_full, t_desc])
+            y_full = np.hstack([y_full, y_desc])
+
+            # Burn 2 — circularize AT the parking-orbit altitude. Without
+            # this, the vehicle is only passing through periapsis of the
+            # big descent ellipse — still moving at that ellipse's periapsis
+            # speed (well above local circular speed; for a GEO-origin
+            # descent this is ~10 km/s vs. ~7.8 km/s circular), so "back at
+            # the parking orbit" wouldn't actually mean a gentle circular
+            # orbit yet without flattening it out here.
+            t_circ_burn = float(t_full[-1])
+            x_p3, y_p3, vx_p3, vy_p3 = y_full[:, -1]
+            r_p3 = np.hypot(x_p3, y_p3)
+            speed_p3 = np.hypot(vx_p3, vy_p3)
+            v_circ_p3 = np.sqrt(Mu / r_p3)
+            dv_circ_requested = max(0.0, speed_p3 - v_circ_p3)
+            dv_circ_applied = min(dv_circ_requested, return_budget)
+            return_budget -= dv_circ_applied
+            already_spent += dv_circ_applied
+            reentry_circ_dv = dv_circ_applied
+            t_reentry_circ  = t_circ_burn
+
+            scale2 = max(0.0, speed_p3 - dv_circ_applied) / speed_p3 if speed_p3 > 0 else 1.0
+            v_circ_applied = speed_p3 * scale2
+            # Snap to a purely tangential direction rather than just scaling
+            # the existing velocity vector: the coast that got us here only
+            # approximates periapsis (bounded by run_coast's own timestep),
+            # so there's a small residual radial component left over — left
+            # unscaled, that turns "circularize" into a slightly elliptical
+            # orbit instead of a clean circle.
+            tx3, ty3 = -y_p3 / r_p3, x_p3 / r_p3
+            y_full[2, -1] = v_circ_applied * tx3
+            y_full[3, -1] = v_circ_applied * ty3
+
+            # A short arc (not a full lap) before the final deorbit burn —
+            # just enough that the two burn markers don't sit on top of each
+            # other in the 3D view. One parking-orbit revolution here would
+            # be a needless extra lap before anything visibly happens.
+            T_park_circ  = 2 * np.pi * np.sqrt(r_p3**3 / Mu)
+            t_coast_gap  = min(120.0, 0.03 * T_park_circ)
+            t_gap, y_gap = run_coast(y_full[:, -1], t_full[-1], t_full[-1] + t_coast_gap)
+            t_full = np.concatenate([t_full, t_gap])
+            y_full = np.hstack([y_full, y_gap])
+        elif needs_return_trip:
+            # Can't even afford the descent burn in full — don't pretend to
+            # circularize at a parking orbit we never reached. Put 100% of
+            # whatever's left toward a single best-effort retrograde burn
+            # from wherever the vehicle actually is (still the original high
+            # orbit), maximizing how far perigee drops even if it can't
+            # reach the ground. The reserve is folded back in here too,
+            # since there's no separate "at parking orbit" burn left to
+            # protect it for.
+            t_descent_burn = float(t_full[-1])
+            dv_descent_applied = min(dv_descent_requested, return_budget + DEORBIT_RESERVE)
+            already_spent += dv_descent_applied
+            reentry_descent_dv = dv_descent_applied
+
+            speed_h = np.hypot(vx_h, vy_h)
+            scale = max(0.0, speed_h - dv_descent_applied) / speed_h if speed_h > 0 else 1.0
+            y_full[2, -1] = vx_h * scale
+            y_full[3, -1] = vy_h * scale
+
+        # Actual deorbit burn — from (roughly) parking-orbit altitude, drop
+        # the opposite apsis into the atmosphere for a realistic entry speed.
+        # Uses whatever's left of the budget PLUS the reserve set aside
+        # above, so this burn is the last one to ever come up short.
+        remaining = max(0.0, oms_dv_budget - already_spent)
+        reentry_perigee = Re
         x_r, y_r, vx_r, vy_r = y_full[:, -1]
         speed = np.hypot(vx_r, vy_r)
         r_r = np.hypot(x_r, y_r)
         a_deorbit = 0.5 * (r_r + reentry_perigee)
         target_speed = np.sqrt(Mu * (2.0 / r_r - 1.0 / a_deorbit))
         reentry_dv_requested = max(0.0, speed - target_speed)
-        # The reentry follows all preceding OMS burns, so it can only spend
-        # what remains after circularization and maneuvering.
-        already_spent = oms_baseline_cost + abs(maneuver_dv_applied)
-        remaining = max(0.0, oms_dv_budget - already_spent)
         reentry_dv_applied = min(reentry_dv_requested, remaining)
-        # A positive UI value means retrograde: remove speed while retaining
-        # the current velocity direction.
         scale = max(0.0, speed - reentry_dv_applied) / speed if speed > 0 else 1.0
         state_deorbit = [x_r, y_r, vx_r * scale, vy_r * scale]
         elements_deorbit = compute_orbital_elements(*state_deorbit)
-        coast_limit = t_reentry + max(7200.0, 2.0 * elements_deorbit["T"])
+
+        t_reentry = float(t_full[-1])
+        # Give the ballistic descent at most ONE extra orbital period beyond
+        # a 30-minute floor to actually intersect the atmosphere and impact
+        # — more than that is just needless extra laps if the burn wasn't
+        # enough to bring it down.
+        coast_limit = t_reentry + max(1800.0, elements_deorbit["T"])
         t_re, y_re, reentry_impacted = run_reentry(
             state_deorbit, t_reentry, coast_limit,
             mass=rocket.payload_mass, Cd=1.2, A=max(1.0, stages[-1].A * 0.25),
@@ -345,6 +620,16 @@ def run():
         oms_burns.append({"t": float(t_coast_start), "dv": float(abs(tr["dv2"])), "label": "Circularization at target"})
     if t_maneuver is not None and abs(maneuver_dv_applied) > 0:
         oms_burns.append({"t": float(t_maneuver), "dv": float(abs(maneuver_dv_applied)), "label": "Second maneuver"})
+    if t_tli is not None and tli_dv_applied > 0:
+        oms_burns.append({"t": float(t_tli), "dv": float(tli_dv_applied), "label": "Trans-Lunar Injection"})
+    if t_loi is not None and loi_dv_applied > 0:
+        oms_burns.append({"t": float(t_loi), "dv": float(loi_dv_applied), "label": "Lunar orbit insertion"})
+    if t_tei is not None and tei_dv_applied > 0:
+        oms_burns.append({"t": float(t_tei), "dv": float(tei_dv_applied), "label": "Trans-Earth injection"})
+    if t_descent_burn is not None and reentry_descent_dv > 0:
+        oms_burns.append({"t": float(t_descent_burn), "dv": float(reentry_descent_dv), "label": "Descent to parking orbit"})
+    if t_reentry_circ is not None and reentry_circ_dv > 0:
+        oms_burns.append({"t": float(t_reentry_circ), "dv": float(reentry_circ_dv), "label": "Circularize at parking orbit"})
     if t_reentry is not None and reentry_dv_applied > 0:
         oms_burns.append({"t": float(t_reentry), "dv": float(reentry_dv_applied), "label": "Deorbit burn"})
 
@@ -374,6 +659,36 @@ def run():
             "dv": float(maneuver_dv_applied), "label": "Second maneuver",
             "retrograde": bool(maneuver_dv_applied < 0),
         })
+    if t_tli is not None and tli_dv_applied > 0:
+        burn_markers.append({
+            "x": float(x_t), "y": float(y_t),
+            "dv": float(tli_dv_applied), "label": "Trans-Lunar Injection",
+            "retrograde": False,
+        })
+    if t_loi is not None and loi_dv_applied > 0:
+        burn_markers.append({
+            "x": float(x_a), "y": float(y_a),
+            "dv": float(-loi_dv_applied), "label": "Lunar orbit insertion",
+            "retrograde": True,
+        })
+    if t_tei is not None and tei_dv_applied > 0:
+        burn_markers.append({
+            "x": float(x_b), "y": float(y_b),
+            "dv": float(tei_dv_applied), "label": "Trans-Earth injection",
+            "retrograde": False,
+        })
+    if t_descent_burn is not None and reentry_descent_dv > 0:
+        burn_markers.append({
+            "x": float(x_h), "y": float(y_h),
+            "dv": float(-reentry_descent_dv), "label": "Descent to parking orbit",
+            "retrograde": True,
+        })
+    if t_reentry_circ is not None and reentry_circ_dv > 0:
+        burn_markers.append({
+            "x": float(x_p3), "y": float(y_p3),
+            "dv": float(-reentry_circ_dv), "label": "Circularize at parking orbit",
+            "retrograde": True,
+        })
     if t_reentry is not None and reentry_dv_applied > 0:
         burn_markers.append({
             "x": float(x_r), "y": float(y_r),
@@ -394,40 +709,17 @@ def run():
     # phases of points — which shows up as visible straight-line "jumps"
     # instead of a smooth curve along the orbit.
     #
-    # Instead we resample uniformly in TIME (interpolating every channel),
-    # and size the frame count from the mission's total duration so short
-    # missions stay light and long ones (multi-orbit coasts, Hohmann
-    # transfers) still render a smooth curve — capped for browser performance.
-    T_total          = float(t_full[-1] - t_full[0])
-    FRAME_INTERVAL_S = 4.0      # long coasts stay light
-    MIN_FRAMES       = 400
-    MAX_FRAMES       = 1400
-    n_frames = int(np.clip(T_total / FRAME_INTERVAL_S, MIN_FRAMES, MAX_FRAMES))
-
-    # Ascents and the parking orbit need much denser points than multi-hour
-    # coasts; otherwise zooming reveals straight-line animation jumps.
-    t_coarse = np.linspace(t_full[0], t_full[-1], n_frames)
-    # Fixed 5s spacing keeps playback speed visually proportional across the
-    # whole detail window (uniform dt => on-screen distance-per-frame scales
-    # directly with real speed, everywhere in this region). Must be bounded
-    # to the PARKING orbit's period, never the target orbit's: T_orbit is
-    # the TARGET orbit's period in the Hohmann branch (up to ~24h for GEO),
-    # and using it here previously produced ~170k extra points, making the
-    # simulation extremely slow / appear to hang.
-    #
-    # When a Hohmann transfer is involved, the detail window must cover all
-    # the way through the transfer coast (t_coast_start == t_trans_end) —
-    # not just one parking-orbit lap. The transfer burn happens at HALF a
-    # parking-orbit revolution (t_park_end = t_apo + 0.5*T_park), so a
-    # one-full-period detail window used to run out partway INTO the
-    # transfer ellipse, causing a visible sudden "speed up" right where the
-    # animation dropped from fine (5s) to coarse spacing mid-ellipse — even
-    # though the underlying telemetry (speed decreasing smoothly along the
-    # transfer) was always correct. Hohmann transfers are bounded by
-    # physics to at most a few hours, so this stays a safe point count.
-    detail_end = t_coast_start if needs_hohmann else min(t_apo + T_orbit, t_full[-1])
-    t_detail = np.arange(t_full[0], detail_end + 5.0, 5.0)
-    t_frames = np.unique(np.concatenate([t_coarse, t_detail, [t_full[-1]]]))
+    # A SINGLE fixed time step for the entire mission, no exceptions per
+    # phase. Any two frames anywhere in the animation are the same distance
+    # apart in TIME, so on-screen distance-per-frame is always directly
+    # proportional to real speed — no visible "speed up" at any phase
+    # boundary (ascent/coast/Hohmann/target orbit/maneuver/reentry), because
+    # there are no boundaries in the sampling at all.
+    T_total = float(t_full[-1] - t_full[0])
+    TARGET_TOTAL_FRAMES = 6000
+    dt_uniform = max(1.0, T_total / TARGET_TOTAL_FRAMES) if T_total > 0 else 1.0
+    t_frames = np.arange(t_full[0], t_full[-1] + dt_uniform, dt_uniform)
+    t_frames = np.unique(np.append(t_frames, t_full[-1]))
     x_frames         = np.interp(t_frames, t_full, y_full[0])
     y_frames         = np.interp(t_frames, t_full, y_full[1])
     speed_frames     = np.interp(t_frames, t_full, tel["speed"])
@@ -435,6 +727,21 @@ def run():
     mass_frames      = np.interp(t_frames, t_full, tel["mass"])
     downrange_frames = np.interp(t_frames, t_full, tel["downrange"])
     accel_frames     = np.interp(t_frames, t_full, tel["accel_g"])
+
+    # Moon position at each displayed frame (for animating it moving along
+    # its orbit), plus its full circular path as a static reference trace.
+    # Only sent when TLI is actually in play — at every other mission scale
+    # (LEO/MEO/GEO), including the Moon's ~384,400km-away reference orbit
+    # would force the 3D view's camera to zoom out to lunar distances,
+    # shrinking the actual mission trajectory down to an invisible speck.
+    if tli_cfg and tli_cfg.get("enabled"):
+        moon_x_frames, moon_y_frames = zip(*(get_moon_position(t) for t in t_frames))
+        _moon_orbit_theta = np.linspace(0, 2 * np.pi, 200)
+        moon_orbit_x = (MoonOrbitR * np.cos(_moon_orbit_theta)).tolist()
+        moon_orbit_y = (MoonOrbitR * np.sin(_moon_orbit_theta)).tolist()
+    else:
+        moon_x_frames, moon_y_frames = [], []
+        moon_orbit_x, moon_orbit_y = [], []
 
     # Active stage + remaining propellant fraction at each frame — used by
     # the HUD to show e.g. "Stage 2: 64% (18.2 t / 28.4 t)". None while
@@ -477,6 +784,12 @@ def run():
         "needs_hohmann"  : needs_hohmann,
         "maneuver_x"     : (x_maneuver_orb.tolist() if isinstance(x_maneuver_orb, np.ndarray) else list(x_maneuver_orb)),
         "maneuver_y"     : (y_maneuver_orb.tolist() if isinstance(y_maneuver_orb, np.ndarray) else list(y_maneuver_orb)),
+        "tli_x"          : (x_tli_orb.tolist() if isinstance(x_tli_orb, np.ndarray) else list(x_tli_orb)),
+        "tli_y"          : (y_tli_orb.tolist() if isinstance(y_tli_orb, np.ndarray) else list(y_tli_orb)),
+        "moon_x"         : list(moon_x_frames),
+        "moon_y"         : list(moon_y_frames),
+        "moon_orbit_x"   : moon_orbit_x,
+        "moon_orbit_y"   : moon_orbit_y,
 
         # Key positions
         "launch_x" : float(y_full[0][0]),
@@ -498,18 +811,50 @@ def run():
             "maneuver_dv_requested": float(maneuver_dv_requested),
             "maneuver_dv_applied"  : float(maneuver_dv_applied),
             "maneuver_limited"     : bool(abs(maneuver_dv_applied) < abs(maneuver_dv_requested) - 1e-6),
+            "t_tli"             : t_tli,
+            "tli_dv_requested"  : float(tli_dv_requested),
+            "tli_dv_applied"    : float(tli_dv_applied),
+            "tli_limited"       : bool(tli_dv_applied < tli_dv_requested - 1e-6),
+            "tli_transit_days"  : tli_transit_days,
+            "t_loi"             : t_loi,
+            "loi_dv_requested"  : float(loi_dv_requested),
+            "loi_dv_applied"    : float(loi_dv_applied),
+            "lunar_orbit_alt_km": lunar_orbit_alt_km,
+            "t_tei"             : t_tei,
+            "tei_dv_requested"  : float(tei_dv_requested),
+            "tei_dv_applied"    : float(tei_dv_applied),
             "t_apo"         : float(t_apo),
             "t_park_end"    : float(t_park_end) if needs_hohmann else None,
             "t_maneuver"    : t_maneuver,
             "t_reentry"     : t_reentry,
+            "t_descent_burn": t_descent_burn,
+            "reentry_descent_dv"  : float(reentry_descent_dv),
+            "reentry_descent_limited": bool(reentry_descent_dv < dv_descent_requested - 1e-6),
+            "t_reentry_circ": t_reentry_circ,
+            "reentry_circ_dv"     : float(reentry_circ_dv),
+            "reentry_circ_limited": bool(reentry_circ_dv < dv_circ_requested - 1e-6),
             "reentry_dv_requested": float(reentry_dv_requested),
             "reentry_dv_applied": float(reentry_dv_applied),
             "reentry_limited": bool(reentry_dv_applied < reentry_dv_requested - 1e-6),
+            "reentry_any_limited": bool(
+                (reentry_descent_dv < dv_descent_requested - 1e-6) or
+                (reentry_circ_dv < dv_circ_requested - 1e-6) or
+                (reentry_dv_applied < reentry_dv_requested - 1e-6)
+            ),
             "reentry_impacted": bool(reentry_impacted),
             "t_coast_start" : float(t_coast_start),
             "max_alt_km"    : float(tel["altitude"].max() / 1000),
             "max_speed_kms" : float(tel["speed"].max() / 1000),
-            "max_q_kpa"     : float(tel["dyn_pres"].max() / 1000),
+            # Max-Q is specifically an ASCENT term (peak aerodynamic load
+            # during launch) — restricted to t <= MECO so an unrelated,
+            # much larger dynamic pressure spike during reentry (a genuinely
+            # different physical phase, at orbital-plus speeds) doesn't get
+            # folded into the same number and misreported as launch max-Q.
+            "max_q_kpa"     : float(tel["dyn_pres"][t_full <= meco_time].max() / 1000),
+            "reentry_max_q_kpa": (
+                float(tel["dyn_pres"][t_full >= t_reentry].max() / 1000)
+                if t_reentry is not None else None
+            ),
             "final_alt_km"  : float(tel["altitude"][-1] / 1000),
             "v_target_kms"  : float(v_circular(target_alt) / 1000),
             "delta_v_ms"    : float(circ["delta_v"]),

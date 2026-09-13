@@ -1,5 +1,66 @@
 import numpy as np
-from constants import Mu, Re
+from constants import Mu, Re, MuMoon, MoonOrbitR, MoonPeriod
+
+# The Moon's phase at t=0. Settable via set_moon_phase() once per mission
+# (see app.py's TLI phase) so the Moon is actually where the spacecraft's
+# transfer trajectory arrives, instead of always starting at a fixed,
+# arbitrary angle unrelated to any specific mission's timing. This is a
+# module-level default rather than a parameter threaded through every
+# physics call site (equations_of_motion, run_coast, run_reentry in
+# solver.py) — a deliberate, documented simplification for this
+# single-process hobby simulator; not safe for concurrent Flask workers
+# processing different missions at once, only for this project's
+# single-request-at-a-time usage.
+_moon_phase0 = 0.0
+
+def set_moon_phase(phase0):
+    global _moon_phase0
+    _moon_phase0 = phase0
+
+def get_moon_position(t):
+    """
+    Simplified circular Moon orbit in the same 2D plane as everything else
+    in this simulator — the real Moon's orbit is elliptical (e≈0.0549) and
+    inclined ~5.14° to the ecliptic, and its actual position at any given
+    date depends on real ephemeris data (e.g. the Skyfield library, using
+    JPL data) rather than a clean circular formula. This is a deliberate
+    simplification consistent with the rest of the engine (single-body,
+    2D Earth-centered dynamics) — it's the same "restricted circular
+    three-body" approximation used in many introductory orbital mechanics
+    treatments, good enough to make TLI/lunar-transfer trajectories
+    physically meaningful (the spacecraft genuinely feels the Moon's
+    gravity) without pulling in a real ephemeris dependency.
+
+    Returns:
+        (x_moon, y_moon) in metres, Earth-centered
+    """
+    theta = 2 * np.pi * (t / MoonPeriod) + _moon_phase0
+    return MoonOrbitR * np.cos(theta), MoonOrbitR * np.sin(theta)
+
+def get_moon_velocity(t):
+    """
+    Velocity (m/s) of the Moon itself along its circular orbit at time t —
+    needed to compute a spacecraft's velocity RELATIVE TO THE MOON (e.g.
+    for a lunar orbit insertion or trans-Earth injection burn, which are
+    sized relative to the Moon's own gravity/motion, not Earth's).
+    """
+    theta = 2 * np.pi * (t / MoonPeriod) + _moon_phase0
+    v = 2 * np.pi * MoonOrbitR / MoonPeriod
+    return -v * np.sin(theta), v * np.cos(theta)
+
+def moon_gravity_accel(x, y, t):
+    """
+    Acceleration (m/s²) on a spacecraft at (x, y) due to the Moon's
+    gravity at time t. Returns (ax, ay) to be added to the spacecraft's
+    total acceleration alongside Earth's own gravity.
+    """
+    x_moon, y_moon = get_moon_position(t)
+    dx, dy = x_moon - x, y_moon - y
+    r = np.hypot(dx, dy)
+    if r < 1.0:
+        return 0.0, 0.0   # guard against a degenerate on-top-of-the-Moon case
+    a = MuMoon / r**2
+    return a * dx / r, a * dy / r
 
 def compute_orbital_elements(x, y, vx, vy):
     """
@@ -28,7 +89,7 @@ def compute_orbital_elements(x, y, vx, vy):
     h = x * vy - y * vx               # m²/s
 
     # --- Eccentricity ---
-    e = np.sqrt(1 + (2 * epsilon * h**2) / Mu**2)
+    e = np.sqrt(max(0.0, 1 + (2 * epsilon * h**2) / Mu**2))
 
     # --- Apoapsis and periapsis radii ---
     r_a = a * (1 + e)

@@ -78,6 +78,19 @@ let stageCount = 0; // number of currently rendered stages, assigned by renderSt
 // ─────────────────────────────────────────────
 // Dynamic stage cards
 // ─────────────────────────────────────────────
+function clampStageProp(i) {
+  const el = document.getElementById(`s${i}-prop`);
+  const maxAttr = el.getAttribute("max");
+  if (maxAttr) {
+    const maxVal = Number(maxAttr);
+    const value = parseFloat(el.value);
+    if (Number.isFinite(value) && value > maxVal) {
+      el.value = maxVal;
+    }
+  }
+  renderFuelAssessment();
+}
+
 function stageCardHTML(i, s) {
   s = s || { dry: 20000, prop: 100000, thrust: 1000000, isp: 300, cd: 0.3, area: 10.52, propellant: "rp1lox", maxProp: null };
   const propOptions = Object.keys(PROPELLANT_ISP).map(key =>
@@ -97,7 +110,7 @@ function stageCardHTML(i, s) {
         </div>
         <div class="field">
           <label>Propellant mass (kg)</label>
-          <input type="number" id="s${i}-prop" value="${s.prop}" min="0" ${s.maxProp ? `max="${s.maxProp}"` : ""}>
+          <input type="number" id="s${i}-prop" value="${s.prop}" min="0" ${s.maxProp ? `max="${s.maxProp}"` : ""} oninput="clampStageProp(${i})">
           <small>${s.maxProp ? `Real capacity max: ${s.maxProp.toLocaleString("en-US")} kg` : "Custom stage: no real capacity limit"}</small>
         </div>
         <div class="field">
@@ -175,15 +188,17 @@ function removeStage(i) {
 }
 
 function readStageFromDOM(i) {
+  const maxProp = Number(document.getElementById(`s${i}-prop`).max) || null;
+  const propRaw = parseFloat(document.getElementById(`s${i}-prop`).value);
   return {
     dry       : parseFloat(document.getElementById(`s${i}-dry`).value),
-    prop      : parseFloat(document.getElementById(`s${i}-prop`).value),
+    prop      : maxProp ? Math.min(propRaw, maxProp) : propRaw,
     thrust    : parseFloat(document.getElementById(`s${i}-thrust`).value),
     isp       : parseFloat(document.getElementById(`s${i}-isp`).value),
     cd        : parseFloat(document.getElementById(`s${i}-cd`).value),
     area      : parseFloat(document.getElementById(`s${i}-area`).value),
     propellant: document.getElementById(`s${i}-propellant`).value,
-    maxProp   : Number(document.getElementById(`s${i}-prop`).max) || null,
+    maxProp   : maxProp,
   };
 }
 
@@ -262,9 +277,49 @@ function hohmannDeltaV(fromAltM, toAltM) {
 }
 
 function estimatedReentryDeltaV(altM) {
-  const r = Re + Math.max(altM, 1), rp = Re;
-  const vCircular = Math.sqrt(Mu / r);
-  return Math.max(0, vCircular - Math.sqrt(Mu * (2 / r - 1 / ((r + rp) / 2))));
+  // Mirrors the backend's actual 3-burn sequence (app.py, PHASE 5) exactly:
+  // if the mission is at a meaningfully higher orbit than the 250-km
+  // parking orbit (e.g. after a Hohmann transfer to MEO/GEO), a direct
+  // single burn from there straight to the surface would enter the
+  // atmosphere at an unrealistic ~10 km/s — the backend instead (1) drops
+  // periapsis down to parking altitude, (2) circularizes there, then (3)
+  // does the actual, much smaller deorbit burn. Estimating only the direct
+  // single-burn Δv here — as this used to do — under-reports what's really
+  // needed by a couple km/s for high-altitude targets, so the "sufficient
+  // fuel" readout wasn't trustworthy for GEO/MEO reentry missions.
+  const parkingM = Math.min(altM, 250e3);
+  const rPark = Re + parkingM;
+  const rHigh = Re + Math.max(altM, 1);
+  let dv = 0;
+  let rBurn3 = rHigh;
+  if (rHigh > 1.5 * rPark) {
+    const aDescent    = 0.5 * (rHigh + rPark);
+    const vHighCircular = Math.sqrt(Mu / rHigh);
+    const vDescent    = Math.sqrt(Mu * (2 / rHigh - 1 / aDescent));
+    const dvDescent   = Math.max(0, vHighCircular - vDescent);
+    const vPeriDescent = Math.sqrt(Mu * (2 / rPark - 1 / aDescent));
+    const vParkCircular = Math.sqrt(Mu / rPark);
+    const dvCircularize = Math.max(0, vPeriDescent - vParkCircular);
+    dv += dvDescent + dvCircularize;
+    rBurn3 = rPark;
+  }
+  const vCircBurn3 = Math.sqrt(Mu / rBurn3);
+  const aDeorbit    = 0.5 * (rBurn3 + Re);
+  const vDeorbit    = Math.sqrt(Mu * (2 / rBurn3 - 1 / aDeorbit));
+  dv += Math.max(0, vCircBurn3 - vDeorbit);
+  return dv;
+}
+
+function estimatedTliDeltaV(altM, targetApoapsisM) {
+  // Mirrors the backend's TLI burn (app.py): a prograde burn from whatever
+  // orbit the mission is in when the maneuver fires, raising apoapsis out
+  // to the target distance (defaults to the Moon's mean distance).
+  const rCurrent = Re + Math.max(altM, 1);
+  const rTarget  = Re + Math.max(targetApoapsisM, 1);
+  const aTransfer = 0.5 * (rCurrent + rTarget);
+  const vCircCurrent = Math.sqrt(Mu / rCurrent);
+  const vTransfer = Math.sqrt(Mu * (2 / rCurrent - 1 / aTransfer));
+  return Math.max(0, vTransfer - vCircCurrent);
 }
 
 function fuelAssessment() {
@@ -272,8 +327,12 @@ function fuelAssessment() {
     ? parseFloat(document.getElementById("custom-alt").value) : selectedOrbit.alt;
   const payloadKg = parseFloat(document.getElementById("payload-mass").value);
   const omsBudget = parseFloat(document.getElementById("oms-dv-budget").value);
-  const maneuverDv = document.getElementById("maneuver-enabled").checked
-    ? Math.abs(parseFloat(document.getElementById("maneuver-dv").value)) : 0;
+  const maneuverMode = document.getElementById("maneuver-mode").value;
+  const maneuverDv = maneuverMode === "raise_lower"
+    ? Math.abs(parseFloat(document.getElementById("maneuver-dv").value))
+    : maneuverMode === "tli"
+      ? estimatedTliDeltaV(altKm * 1000, parseFloat(document.getElementById("tli-target-apoapsis").value) * 1000)
+      : 0;
   const reentryDv = document.getElementById("reentry-enabled").checked
     ? estimatedReentryDeltaV(altKm * 1000) : 0;
   const stages = Array.from({ length: stageCount }, (_, i) => readStageFromDOM(i));
@@ -376,8 +435,9 @@ const ORBIT_LABELS = {
 };
 
 function toggleManeuverFields() {
-  const enabled = document.getElementById("maneuver-enabled").checked;
-  document.getElementById("maneuver-fields").style.display = enabled ? "block" : "none";
+  const mode = document.getElementById("maneuver-mode").value;
+  document.getElementById("maneuver-fields").style.display = mode === "raise_lower" ? "block" : "none";
+  document.getElementById("tli-fields").style.display      = mode === "tli" ? "block" : "none";
   renderFuelAssessment();
 }
 
@@ -476,9 +536,14 @@ async function runSimulation() {
     n_orbits      : document.getElementById("n-orbits").value,
     oms_dv_budget : document.getElementById("oms-dv-budget").value,
     second_maneuver: {
-      enabled : document.getElementById("maneuver-enabled").checked,
+      enabled : document.getElementById("maneuver-mode").value === "raise_lower",
       delta_v : document.getElementById("maneuver-dv").value,
       wait_min: document.getElementById("maneuver-wait").value,
+    },
+    tli: {
+      enabled            : document.getElementById("maneuver-mode").value === "tli",
+      target_apoapsis_km : document.getElementById("tli-target-apoapsis").value,
+      wait_min           : document.getElementById("tli-wait").value,
     },
     reentry: {
       enabled : document.getElementById("reentry-enabled").checked,
@@ -486,6 +551,9 @@ async function runSimulation() {
       wait_min: document.getElementById("reentry-wait").value,
     },
   };
+
+  console.log("Post-insertion maneuver mode:", document.getElementById("maneuver-mode").value);
+  console.log("Payload sent to /run:", JSON.parse(JSON.stringify(payload)));
 
   btn.disabled = true;
   status.classList.remove("hidden");
@@ -798,6 +866,17 @@ function buildPlot(data) {
     });
   }
 
+  // Trans-lunar transfer trajectory (if TLI is enabled and produced a trace)
+  if (d.tli_x && d.tli_x.length > 0) {
+    traces.push({
+      type: "scatter3d", mode: "lines",
+      x: d.tli_x, y: d.tli_y, z: d.tli_x.map(_ => 0),
+      line: { color: "silver", width: 2, dash: "dashdot" },
+      name: `Trans-lunar transfer`,
+      hoverinfo: "skip",
+    });
+  }
+
   // Final target orbit
   traces.push({
     type: "scatter3d", mode: "lines",
@@ -854,6 +933,26 @@ function buildPlot(data) {
   window._trajIdx   = traces.length - 2;
   window._rocketIdx = traces.length - 1;
 
+  // Moon — reference orbit path (static circle) + a marker that moves
+  // along it per frame, same pattern as the rocket marker above.
+  if (d.moon_orbit_x && d.moon_orbit_x.length > 0) {
+    traces.push({
+      type: "scatter3d", mode: "lines",
+      x: d.moon_orbit_x, y: d.moon_orbit_y, z: d.moon_orbit_x.map(_ => 0),
+      line: { color: "rgba(200,200,200,0.35)", width: 1, dash: "dot" },
+      name: "Moon orbit (circular approx.)",
+      hoverinfo: "skip",
+    });
+    traces.push({
+      type: "scatter3d", mode: "markers",
+      x: [d.moon_x[0]], y: [d.moon_y[0]], z: [0],
+      marker: { color: "rgb(200,200,200)", size: 14, symbol: "circle" },
+      name: "Moon",
+      hoverinfo: "skip",
+    });
+    window._moonIdx = traces.length - 1;
+  }
+
   const orbitX = d.final_orbit_x || d.park_orbit_x || [];
   const orbitY = d.final_orbit_y || d.park_orbit_y || [];
   // Include every orbit trace that might be drawn (target, transfer, and
@@ -862,8 +961,8 @@ function buildPlot(data) {
   // bigger (e.g. a raised orbit after the second maneuver) gets clipped
   // outside the box entirely, which looks like "nothing renders" no
   // matter how far the camera zooms out.
-  const allX = [...orbitX, ...(d.transfer_x || []), ...(d.maneuver_x || [])];
-  const allY = [...orbitY, ...(d.transfer_y || []), ...(d.maneuver_y || [])];
+  const allX = [...orbitX, ...(d.transfer_x || []), ...(d.maneuver_x || []), ...(d.tli_x || []), ...(d.moon_orbit_x || [])];
+  const allY = [...orbitY, ...(d.transfer_y || []), ...(d.maneuver_y || []), ...(d.tli_y || []), ...(d.moon_orbit_y || [])];
   const maxR = allX.length > 0
     ? Math.max(...allX.map(Math.abs), ...allY.map(Math.abs)) * 1.3
     : Re * 1.8;
@@ -989,6 +1088,15 @@ function updateFrame(data, i) {
     z: [[0]],
   }, [window._rocketIdx]);
 
+  // Moon marker, moving along its own orbit
+  if (window._moonIdx !== undefined && data.moon_x) {
+    Plotly.restyle("plot3d", {
+      x: [[data.moon_x[i]]],
+      y: [[data.moon_y[i]]],
+      z: [[0]],
+    }, [window._moonIdx]);
+  }
+
   // Ground track + sub-satellite point, kept in sync with the trajectory
   const gt = window._groundTrackData;
   if (gt) {
@@ -1053,6 +1161,16 @@ function updateHUD(data, i) {
       phase = "Atmospheric reentry";
     } else if (s.t_maneuver !== null && s.t_maneuver !== undefined) {
       phase = "Post-maneuver orbit";
+    } else if (s.t_tli !== null && s.t_tli !== undefined && t < s.t_tli) {
+      phase = "Circular orbit";
+    } else if (s.t_loi !== null && s.t_loi !== undefined && t < s.t_loi) {
+      phase = "Trans-lunar coast";
+    } else if (s.t_tei !== null && s.t_tei !== undefined && t < s.t_tei) {
+      phase = "Lunar orbit";
+    } else if (s.t_tei !== null && s.t_tei !== undefined) {
+      phase = "Trans-Earth coast";
+    } else if (s.t_tli !== null && s.t_tli !== undefined) {
+      phase = "Trans-lunar coast";
     } else {
       phase = "Circular orbit";
     }
@@ -1110,6 +1228,15 @@ function updateHUD(data, i) {
   }
   if (s.t_maneuver !== null && s.t_maneuver !== undefined) {
     events.push([s.t_maneuver, "Second maneuver burn"]);
+  }
+  if (s.t_tli !== null && s.t_tli !== undefined) {
+    events.push([s.t_tli, "Trans-Lunar Injection burn"]);
+  }
+  if (s.t_loi !== null && s.t_loi !== undefined) {
+    events.push([s.t_loi, "Lunar orbit insertion burn"]);
+  }
+  if (s.t_tei !== null && s.t_tei !== undefined) {
+    events.push([s.t_tei, "Trans-Earth injection burn"]);
   }
   if (s.t_reentry !== null && s.t_reentry !== undefined) {
     events.push([s.t_reentry, "Deorbit burn"]);
@@ -1178,13 +1305,50 @@ function fillSummary(s) {
       summaryRows.push(["⚠ Capped", "not enough OMS budget left"]);
     }
   }
-  if (s.t_reentry !== null && s.t_reentry !== undefined) {
+  if (s.t_tli !== null && s.t_tli !== undefined) {
     summaryRows.push(
-      ["── Reentry ──", ""],
-      ["Deorbit Δv", s.reentry_dv_applied.toFixed(0) + " / " + s.reentry_dv_requested.toFixed(0) + " m/s"],
-      ["Outcome", s.reentry_impacted ? "surface reached" : "atmospheric pass not completed"],
+      ["── Trans-Lunar Injection ──", ""],
+      ["Δv requested",  s.tli_dv_requested.toFixed(0) + " m/s"],
+      ["Δv applied",    s.tli_dv_applied.toFixed(0) + " m/s"],
+      ["Transit time",  s.tli_transit_days.toFixed(1) + " days"],
     );
+    if (s.tli_limited) {
+      summaryRows.push(["⚠ Capped", "not enough OMS budget left — transit time reflects the smaller achieved orbit"]);
+    }
+    if (s.t_loi !== null && s.t_loi !== undefined) {
+      summaryRows.push(
+        ["── Lunar orbit insertion ──", ""],
+        ["Closest approach", s.lunar_orbit_alt_km.toFixed(0) + " km from Moon"],
+        ["LOI Δv",  s.loi_dv_applied.toFixed(0) + " / " + s.loi_dv_requested.toFixed(0) + " m/s"],
+      );
+    }
+    if (s.t_tei !== null && s.t_tei !== undefined) {
+      summaryRows.push(
+        ["── Trans-Earth injection ──", ""],
+        ["TEI Δv",  s.tei_dv_applied.toFixed(0) + " / " + s.tei_dv_requested.toFixed(0) + " m/s"],
+      );
+    }
+    summaryRows.push(["Note", "Simplified circular, coplanar Moon orbit — real Earth-return targeting not precisely aimed"]);
+  }
+  if (s.t_reentry !== null && s.t_reentry !== undefined) {
+    summaryRows.push(["── Reentry ──", ""]);
+    if (s.t_descent_burn !== null && s.t_descent_burn !== undefined) {
+      summaryRows.push(["Descent to parking Δv", s.reentry_descent_dv.toFixed(0) + " m/s"]);
+      if (s.reentry_descent_limited) summaryRows.push(["⚠ Descent capped", "not enough OMS budget left"]);
+    }
+    if (s.t_reentry_circ !== null && s.t_reentry_circ !== undefined) {
+      summaryRows.push(["Circularize at parking Δv", s.reentry_circ_dv.toFixed(0) + " m/s"]);
+      if (s.reentry_circ_limited) summaryRows.push(["⚠ Circularization capped", "not enough OMS budget left — orbit stayed elliptical"]);
+    }
+    summaryRows.push(["Deorbit Δv", s.reentry_dv_applied.toFixed(0) + " / " + s.reentry_dv_requested.toFixed(0) + " m/s"]);
     if (s.reentry_limited) summaryRows.push(["⚠ Deorbit capped", "not enough OMS budget left"]);
+    summaryRows.push(["Outcome", s.reentry_impacted ? "surface reached" : "atmospheric pass not completed"]);
+    if (s.reentry_max_q_kpa !== null && s.reentry_max_q_kpa !== undefined) {
+      summaryRows.push(["Max reentry dynamic pressure", s.reentry_max_q_kpa.toFixed(1) + " kPa"]);
+    }
+    if (s.reentry_any_limited && !s.reentry_impacted) {
+      summaryRows.push(["⚠ Budget too low", "raise the OMS Δv budget to complete this reentry"]);
+    }
   }
 
   const orbitalRows = [

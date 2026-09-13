@@ -29,7 +29,34 @@
 ### Orbital mechanics
 - [x] Second delta-V maneuver — raise/lower orbit after insertion
 - [x] Reentry burn — deorbit and ballistic atmospheric trajectory
-- [ ] Trans-Lunar Injection (TLI) — burn to lunar transfer orbit
+- [x] Trans-Lunar Injection (TLI) — burn to lunar transfer orbit.
+      Implementation notes:
+        - Prograde burn computed automatically (vis-viva) from the current
+          orbit to a configurable target apoapsis (defaults to the Moon's
+          mean distance, 384,400 km), same OMS Δv budget as everything else.
+        - The Moon is now a real second gravitational body (not just a
+          drawn target point): added to constants.py (mass, orbital
+          radius, period) and orbital.py (get_moon_position — a
+          simplified CIRCULAR orbit in the same 2D plane, own-calculation,
+          no external library), with its gravity added into
+          equations_of_motion/run_coast/run_reentry in solver.py. Verified
+          the spacecraft trajectory genuinely deviates from a pure
+          Keplerian ellipse because of it (~2,700km off target apoapsis
+          in one test case) — this is a real (restricted) three-body
+          effect, not just cosmetic.
+        - Known simplification: circular, coplanar Moon orbit with an
+          arbitrary phase at t=0 (no real calendar epoch/date is modeled
+          anywhere in this simulator). The real Moon's orbit is elliptical
+          (e≈0.055) and inclined ~5.14° to the ecliptic.
+        - TODO (future precision upgrade): swap get_moon_position() for
+          the Skyfield library (pip install skyfield), which gives the
+          Moon's real position from JPL ephemeris data for an actual
+          calendar date/time, instead of the simplified circular formula.
+        - Lunar arrival/orbit insertion is still NOT simulated — the Moon's
+          gravity affects the coast trajectory correctly, but there's no
+          sphere-of-influence patching, no lunar orbit capture logic, and
+          the mission just keeps coasting past/around the Moon on
+          whatever perturbed path results.
 - [ ] Real-time apoapsis/periapsis display in HUD (computed from current state)
 
 ### Visualization
