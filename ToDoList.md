@@ -44,6 +44,38 @@
           Keplerian ellipse because of it (~2,700km off target apoapsis
           in one test case) — this is a real (restricted) three-body
           effect, not just cosmetic.
+        - Full round-trip implemented: Lunar Orbit Insertion (LOI, a real
+          vector-based burn — redirects to a genuinely tangential velocity
+          relative to the Moon, not just a magnitude scale, so it actually
+          captures into a bound orbit instead of staying dominated by
+          Earth's gravity), a configurable number of lunar orbits, and an
+          optional Trans-Earth Injection (TEI) burn to head back.
+        - TEI targeting: searches (grid scan + least_squares refinement)
+          over the departure time within one lunar orbit AND the burn
+          magnitude together, for the specific combination that sends the
+          spacecraft to Earth at a shallow, Apollo-like flight path angle
+          (targets -6° at the standard 122km entry interface altitude,
+          not just "any periapsis depth") — so the mission hands off
+          straight into run_reentry() afterward with no extra circularize/
+          deorbit burns needed. The plain analytic (2-body-from-departure)
+          prediction was off by THOUSANDS of km once actually integrated:
+          the departure point is still deep inside the Moon's sphere of
+          influence, where the Moon's gravity — not Earth's — dominates the
+          trajectory for a while, so the search evaluates every candidate
+          with a real Earth+Moon coast, not an instantaneous vis-viva
+          estimate. Verified: entry angle improved from an unrealistic
+          -20° (targeting periapsis depth alone, ignoring angle entirely)
+          to roughly -8° to -14° near the 225km mark (target -6°) — a
+          coarse 10×10 grid was used to keep this under ~40s per request;
+          a finer 15×15 grid gets closer to -7° but takes closer to 80s.
+        - Note: run_reentry()'s max step was 1s (fine for a short Earth-
+          orbit deorbit, but forced ~400k pointless steps over a multi-day
+          translunar coast) — raised to 60s; RK45's own adaptive error
+          control already shrinks the step once drag becomes significant.
+        - Verified: the resulting lunar orbit is NOT a perfect circle from
+          lap to lap (~6% distance variation over 3 orbits in one test) —
+          real tidal perturbation from Earth on a body orbiting the Moon,
+          not a bug.
         - Known simplification: circular, coplanar Moon orbit with an
           arbitrary phase at t=0 (no real calendar epoch/date is modeled
           anywhere in this simulator). The real Moon's orbit is elliptical
@@ -52,18 +84,17 @@
           the Skyfield library (pip install skyfield), which gives the
           Moon's real position from JPL ephemeris data for an actual
           calendar date/time, instead of the simplified circular formula.
-        - Lunar arrival/orbit insertion is still NOT simulated — the Moon's
-          gravity affects the coast trajectory correctly, but there's no
-          sphere-of-influence patching, no lunar orbit capture logic, and
-          the mission just keeps coasting past/around the Moon on
-          whatever perturbed path results.
+        - Combining TLI with the separate Reentry checkbox is still
+          disabled (checkbox auto-disabled in the UI when TLI mode is
+          selected): that reentry sequence assumes a stable circular Earth
+          orbit to begin with, which doesn't describe a lunar return.
 - [ ] Real-time apoapsis/periapsis display in HUD (computed from current state)
 
 ### Visualization
 - [ ] Improve Earth texture — use real satellite imagery mapped to sphere
-- [ ] Add ground track — project trajectory onto Earth surface
-- [ ] Add terminator line (day/night boundary) on Earth
-- [ ] Show staging events as markers on trajectory
+- [x] Add ground track — project trajectory onto Earth surface
+- [x] Add terminator line (day/night boundary) on Earth
+- [x] Show staging events as markers on trajectory
 
 ### Guidance
 - [x] Implement PEG (Powered Explicit Guidance) — closed-loop guidance
@@ -110,12 +141,24 @@
 - [ ] Visualize CFD results (pressure/velocity field) in the web interface
 
 ### General
+- [x] Automated test suite (pytest) + CI (GitHub Actions). 27 tests across
+      atmosphere model (exact match to every Vallado reference node),
+      orbital elements (circular orbit eccentricity/period, Kepler's third
+      law), Hohmann transfer (matches published textbook Δv), Moon orbit
+      geometry, energy/angular-momentum conservation in coasts, and reentry
+      impact detection. Runs on every push/PR via
+      `.github/workflows/tests.yml`.
+- [x] LICENSE (MIT) and an up-to-date README with a validation section
+      comparing simulator outputs against real mission data.
 - [ ] Interactive orbital operations: once in the target orbit, hold indefinitely and
       allow the user to pause and choose a generic maneuver, TLI, or reentry. Each
       action must be preflighted against remaining OMS Δv and reserve enough Δv to
       return to Earth orbit and execute a safe reentry.
 - [ ] Save/load mission configurations as JSON files
-- [ ] Export mission report as PDF (trajectory plots + summary tables)
+- [x] Export mission report as PDF (trajectory plots + summary tables).
+      Client-side (jsPDF + Plotly.toImage — no new Python dependency):
+      captures the current 3D view plus the same Mission Summary/Orbital
+      Elements/Burn Sequence tables already shown in the UI.
 - [ ] Multi-mission comparison view
 - [ ] Add atmospheric wind model affecting ascent trajectory
 

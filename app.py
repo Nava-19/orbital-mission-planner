@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.optimize import least_squares
 from flask import Flask, render_template, request, jsonify
 
 from constants   import Mu, Re, MoonOrbitR, MuMoon, MoonPeriod
@@ -96,9 +97,6 @@ def run():
     )
 
     print(f"Target: {target_alt/1000:.0f} km | t_end: {rocket.timeline[-1][2]*1.2:.0f}s")
-    print(f"  second_maneuver.enabled={maneuver_cfg.get('enabled')}  "
-          f"tli.enabled={tli_cfg.get('enabled')} (target_apoapsis_km={tli_cfg.get('target_apoapsis_km')})  "
-          f"reentry.enabled={reentry_cfg.get('enabled')}  oms_dv_budget={oms_dv_budget}")
 
     # ════════════════════════════════════════════
     # PHASE 1 — Powered ascent
@@ -317,6 +315,7 @@ def run():
     tei_dv_requested = 0.0
     tei_dv_applied = 0.0
     lunar_orbit_alt_km = None
+    tli_return_impacted = None
     if tli_cfg and tli_cfg.get("enabled"):
         target_apoapsis_km = float(tli_cfg.get("target_apoapsis_km", 384400))
         wait_s = float(tli_cfg.get("wait_min", 0)) * 60.0
@@ -372,6 +371,17 @@ def run():
         # there — same math as every other circularization burn in this
         # app, just relative to the MOON's gravity and motion instead of
         # Earth's.
+        #
+        # Critically, this must REDIRECT the relative velocity to a genuinely
+        # TANGENTIAL direction (relative to the Moon), not just rescale the
+        # incoming vector's magnitude — a spacecraft arriving from Earth is
+        # moving mostly RADIALLY toward/past the Moon at closest approach, so
+        # merely slowing that same (still mostly radial) vector down to
+        # "v_circ_moon" does NOT produce a bound lunar orbit: it stays
+        # dominated by Earth's gravity and just continues on another
+        # Earth-centered ellipse instead of actually orbiting the Moon. This
+        # is the same fix as the Earth-orbit circularization burn elsewhere
+        # in this file (full vector correction, not a magnitude-only scale).
         t_loi = float(t_full[-1])
         x_a, y_a, vx_a, vy_a = y_full[:, -1]
         xm, ym = get_moon_position(t_loi)
@@ -383,65 +393,180 @@ def run():
         lunar_orbit_alt_km = float(r_rel / 1000.0)   # informational — Moon radius not modeled as a body to collide with
 
         v_circ_moon = np.sqrt(MuMoon / r_rel) if r_rel > 0 else 0.0
-        loi_dv_requested = max(0.0, speed_rel - v_circ_moon)
+        r_hat_x, r_hat_y = (dx / r_rel, dy / r_rel) if r_rel > 0 else (0.0, 0.0)
+        t_hat_x, t_hat_y = -r_hat_y, r_hat_x
+        # Keep the same sense of rotation the incoming trajectory already
+        # has around the Moon (its relative angular momentum sign), rather
+        # than arbitrarily always picking +t_hat.
+        ang_mom_rel = dx * dvy - dy * dvx
+        spin_sign = 1.0 if ang_mom_rel >= 0 else -1.0
+        target_dvx = spin_sign * v_circ_moon * t_hat_x
+        target_dvy = spin_sign * v_circ_moon * t_hat_y
+
+        dv_full_x, dv_full_y = target_dvx - dvx, target_dvy - dvy
+        loi_dv_requested = float(np.hypot(dv_full_x, dv_full_y))
         already_spent_loi = already_spent_tli + tli_dv_applied
         remaining_loi = max(0.0, oms_dv_budget - already_spent_loi)
-        loi_dv_applied = min(loi_dv_requested, remaining_loi)
+        frac_loi = min(1.0, remaining_loi / loi_dv_requested) if loi_dv_requested > 0 else 1.0
+        loi_dv_applied = frac_loi * loi_dv_requested
 
-        scale_loi = (speed_rel - loi_dv_applied) / speed_rel if speed_rel > 0 else 1.0
-        new_dvx, new_dvy = dvx * scale_loi, dvy * scale_loi
+        new_dvx = dvx + frac_loi * dv_full_x
+        new_dvy = dvy + frac_loi * dv_full_y
         y_full[2, -1] = vxm + new_dvx
         y_full[3, -1] = vym + new_dvy
 
-        # ── Coast 1.5 orbits around the Moon ──
+        # ── Coast N orbits around the Moon (user-configurable, default 1.5) ──
+        lunar_orbits = float(tli_cfg.get("lunar_orbits", 1.5))
         T_lunar = 2 * np.pi * np.sqrt(r_rel**3 / MuMoon) if r_rel > 0 else 0.0
-        t_lunar_end = t_loi + 1.5 * T_lunar
+        t_lunar_end = t_loi + lunar_orbits * T_lunar
         t_lo, y_lo = run_coast(y_full[:, -1], t_loi, t_lunar_end)
         t_full = np.concatenate([t_full, t_lo])
         y_full = np.hstack([y_full, y_lo])
 
-        # ── Trans-Earth Injection (TEI) ──
-        # Symmetric with LOI in spirit (burn relative to the Moon), but
-        # targeting a modest margin ABOVE local escape velocity so the
-        # spacecraft actually breaks free of the Moon's gravity well and
-        # heads back out, rather than just loosening the current orbit.
-        t_tei = float(t_full[-1])
-        x_b, y_b, vx_b, vy_b = y_full[:, -1]
-        xm2, ym2 = get_moon_position(t_tei)
-        vxm2, vym2 = get_moon_velocity(t_tei)
-        dxb, dyb   = x_b - xm2, y_b - ym2
-        dvxb, dvyb = vx_b - vxm2, vy_b - vym2
-        r_rel2     = np.hypot(dxb, dyb)
-        speed_rel2 = np.hypot(dvxb, dvyb)
+        # ── Trans-Earth Injection (TEI) — only if the user wants a return.
+        # Unchecking this just leaves the mission captured in lunar orbit
+        # for the orbit count above, rather than always flying itself back
+        # regardless of preference.
+        return_to_earth = bool(tli_cfg.get("return_to_earth", True))
+        if return_to_earth:
+            # Instead of firing the departure burn at a fixed point right
+            # after the configured orbit count, search over the NEXT full
+            # lunar orbit (timing) and the departure burn's magnitude
+            # together for the specific combination that sends the
+            # spacecraft directly to an Earth periapsis just inside the
+            # atmosphere — a real "free-return"-style targeting (same idea
+            # Apollo's trans-Earth trajectories used), so the mission can
+            # hand off straight into run_reentry() afterward instead of
+            # needing extra circularize/deorbit burns.
+            theta0_loi = float(np.arctan2(dy, dx))   # angle at LOI (dx,dy from the LOI block above)
+            v_escape_moon = np.sqrt(2.0 * MuMoon / r_rel) if r_rel > 0 else 0.0
 
-        v_escape_moon = np.sqrt(2.0 * MuMoon / r_rel2) if r_rel2 > 0 else 0.0
-        v_tei_target  = v_escape_moon * 1.05   # 5% margin over parabolic escape
-        tei_dv_requested = max(0.0, v_tei_target - speed_rel2)
-        already_spent_tei = already_spent_loi + loi_dv_applied
-        remaining_tei = max(0.0, oms_dv_budget - already_spent_tei)
-        tei_dv_applied = min(tei_dv_requested, remaining_tei)
+            # Targeting periapsis DEPTH alone (e.g. "30km below the surface")
+            # under-constrains the problem: many different (departure time,
+            # burn size) combinations can hit the same periapsis altitude
+            # while arriving at wildly different STEEPNESS — one search
+            # converged to a ~-20° flight path angle at 225km altitude,
+            # nearly three times steeper than a real, shallow lunar-return
+            # entry (Apollo targeted about -6.5°). Targeting the flight path
+            # angle directly, at the standard 122km "entry interface"
+            # reference altitude used in real mission design, is the
+            # physically correct thing to aim for instead.
+            ENTRY_INTERFACE_ALT   = 122000.0   # m — standard reference altitude
+            TARGET_ENTRY_ANGLE_DEG = -6.0       # shallow, Apollo-like entry
 
-        scale_tei = (speed_rel2 + tei_dv_applied) / speed_rel2 if speed_rel2 > 0 else 1.0
-        new_dvxb, new_dvyb = dvxb * scale_tei, dvyb * scale_tei
-        y_full[2, -1] = vxm2 + new_dvxb
-        y_full[3, -1] = vym2 + new_dvyb
+            def _predict_departure(tau, margin):
+                t_dep = t_lunar_end + tau
+                elapsed = t_dep - t_loi
+                theta = theta0_loi + spin_sign * (2 * np.pi / T_lunar) * elapsed
+                xr, yr = r_rel * np.cos(theta), r_rel * np.sin(theta)
+                tx, ty = -np.sin(theta), np.cos(theta)
+                xm_, ym_ = get_moon_position(t_dep)
+                vxm_, vym_ = get_moon_velocity(t_dep)
+                v_dep = v_escape_moon * margin
+                vxr, vyr = spin_sign * v_dep * tx, spin_sign * v_dep * ty
+                return xm_ + xr, ym_ + yr, vxm_ + vxr, vym_ + vyr, t_dep
 
-        # ── Coast back toward Earth ──
-        # A full, precisely-targeted Earth-return trajectory (aiming for a
-        # specific safe reentry corridor) is a much harder targeting problem
-        # than this simplified patched-two-body model attempts — this just
-        # coasts under real Earth+Moon gravity for roughly the same duration
-        # as the outbound transit, showing a physically genuine (if not
-        # precisely aimed) return leg.
-        t_return_end = t_tei + 0.5 * T_tli
-        t_ret, y_ret = run_coast(y_full[:, -1], t_tei, t_return_end)
-        t_full = np.concatenate([t_full, t_ret])
-        y_full = np.hstack([y_full, y_ret])
+            def _real_residual(params):
+                tau, margin = params
+                xA, yA, vxA, vyA, t_dep_ = _predict_departure(tau, margin)
+                el_guess = compute_orbital_elements(xA, yA, vxA, vyA)
+                T_guess = el_guess["T"] if np.isfinite(el_guess["T"]) and el_guess["T"] > 0 else 20 * 86400.0
+                T_guess = min(max(T_guess * 1.5, 5 * 86400.0), 30 * 86400.0)
+                _, y_c = run_coast([xA, yA, vxA, vyA], t_dep_, t_dep_ + T_guess, dt=900.0)
+                r_c = np.hypot(y_c[0], y_c[1])
+                r_interface = Re + ENTRY_INTERFACE_ALT
+                below = r_c <= r_interface
+                if not below.any():
+                    # Doesn't reach the interface at all within the window —
+                    # penalize by how far short it fell, so the optimizer
+                    # still has a usable gradient toward actually getting
+                    # there, instead of a flat "wrong" signal everywhere.
+                    return [(r_c.min() - r_interface) / 1000.0]
+                idx = max(int(np.argmax(below)), 1)
+                xk, yk, vxk, vyk = y_c[0][idx], y_c[1][idx], y_c[2][idx], y_c[3][idx]
+                rk, speed_k = np.hypot(xk, yk), np.hypot(vxk, vyk)
+                angle = np.degrees(np.arcsin((xk * vxk + yk * vyk) / (rk * speed_k)))
+                return [angle - TARGET_ENTRY_ANGLE_DEG]
+
+            # The departure point is still WELL inside the Moon's sphere of
+            # influence, where the Moon's gravity — not Earth's — dominates
+            # the trajectory for a while after the burn. A single-instant,
+            # Earth-only analytic estimate (vis-viva from the departure
+            # state alone) turned out to be off by thousands of km once
+            # actually integrated with real Earth+Moon gravity — not a
+            # small correction, a fundamentally different answer. So the
+            # search itself uses real coasts throughout, not just a
+            # refinement step after an analytic guess.
+            _taus  = np.linspace(0.0, T_lunar, 10)
+            _margs = np.linspace(1.0, 3.0, 10)
+            _best_grid = None
+            _best_grid_val = np.inf
+            for _tau in _taus:
+                for _marg in _margs:
+                    _val = abs(_real_residual([_tau, _marg])[0])
+                    if _val < _best_grid_val:
+                        _best_grid_val = _val
+                        _best_grid = (_tau, _marg)
+
+            best_sol = least_squares(
+                _real_residual, x0=list(_best_grid),
+                bounds=([0.0, 1.0], [T_lunar, 3.0]),
+                xtol=1e-6, ftol=1e-6, max_nfev=40,
+            )
+            tau_best, margin_best = best_sol.x
+            _, _, vx_target, vy_target, t_dep = _predict_departure(tau_best, margin_best)
+
+            # Coast from the end of the configured orbit count to the
+            # departure point the search found.
+            if tau_best > 1.0:
+                t_extra, y_extra = run_coast(y_full[:, -1], t_full[-1], t_dep)
+                t_full = np.concatenate([t_full, t_extra])
+                y_full = np.hstack([y_full, y_extra])
+
+            # Apply the TEI burn there, clipped to whatever OMS budget is
+            # actually left (a partial burn simply won't quite reach the
+            # atmosphere — reported honestly, same as everywhere else).
+            t_tei = float(t_full[-1])
+            x_b, y_b, vx_b, vy_b = y_full[:, -1]
+            dv_full_x, dv_full_y = vx_target - vx_b, vy_target - vy_b
+            tei_dv_requested = float(np.hypot(dv_full_x, dv_full_y))
+            already_spent_tei = already_spent_loi + loi_dv_applied
+            remaining_tei = max(0.0, oms_dv_budget - already_spent_tei)
+            frac_tei = min(1.0, remaining_tei / tei_dv_requested) if tei_dv_requested > 0 else 1.0
+            tei_dv_applied = frac_tei * tei_dv_requested
+
+            y_full[2, -1] = vx_b + frac_tei * dv_full_x
+            y_full[3, -1] = vy_b + frac_tei * dv_full_y
+
+            # ── Coast back toward Earth and straight into reentry ──
+            # Since the burn above was aimed at an atmosphere-intersecting
+            # periapsis, run_reentry (vacuum coast, then drag once low
+            # enough, then impact detection) handles the ENTIRE return leg
+            # — no separate "coast back" placeholder or extra burns needed.
+            state_departure = y_full[:, -1]
+            elements_departure = compute_orbital_elements(*state_departure)
+            T_return = elements_departure["T"]
+            coast_limit = t_tei + max(1800.0, T_return)
+            t_ret, y_ret, tli_return_impacted = run_reentry(
+                state_departure, t_tei, coast_limit,
+                mass=rocket.payload_mass, Cd=1.2, A=max(1.0, stages[-1].A * 0.25),
+            )
+            t_full = np.concatenate([t_full, t_ret])
+            y_full = np.hstack([y_full, y_ret])
 
     # ════════════════════════════════════════════
     # PHASE 5 — Optional deorbit burn and ballistic reentry
     # ════════════════════════════════════════════
-    reentry = reentry_cfg
+    # Deliberately NOT run after a TLI mission: this reentry sequence
+    # assumes it starts from a stable, roughly circular Earth orbit (the
+    # vis-viva math for "descend to parking, then circularize" only makes
+    # sense for that case). A trans-Earth return from the Moon arrives on a
+    # fast, highly eccentric approach instead — treating it as "just
+    # another high circular orbit to bring down" produced a physically
+    # nonsensical extra loop rather than a real free-return-to-atmosphere
+    # trajectory. Properly handling that is a separate, bigger feature
+    # (tracked in ToDoList.md) rather than a quick patch here.
+    reentry = reentry_cfg if t_tli is None else {}
     t_descent_burn = None        # time of the optional "return to parking orbit" burn
     t_reentry_circ = None        # time of the optional circularization-at-parking burn
     t_reentry = None             # time of the actual atmosphere-targeting deorbit burn
@@ -823,6 +948,7 @@ def run():
             "t_tei"             : t_tei,
             "tei_dv_requested"  : float(tei_dv_requested),
             "tei_dv_applied"    : float(tei_dv_applied),
+            "tli_return_impacted": tli_return_impacted,
             "t_apo"         : float(t_apo),
             "t_park_end"    : float(t_park_end) if needs_hohmann else None,
             "t_maneuver"    : t_maneuver,
@@ -842,6 +968,7 @@ def run():
                 (reentry_dv_applied < reentry_dv_requested - 1e-6)
             ),
             "reentry_impacted": bool(reentry_impacted),
+            "reentry_skipped_tli": bool(t_tli is not None and reentry_cfg.get("enabled")),
             "t_coast_start" : float(t_coast_start),
             "max_alt_km"    : float(tel["altitude"].max() / 1000),
             "max_speed_kms" : float(tel["speed"].max() / 1000),

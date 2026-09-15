@@ -116,7 +116,8 @@ def compute_orbital_elements(x, y, vx, vy):
     e_vec_norm = e_vec / (np.linalg.norm(e_vec) + 1e-12)
     cos_nu     = np.clip(np.dot(e_vec_norm, r_vec / r), -1, 1)
     nu         = np.degrees(np.arccos(cos_nu))
-    if np.cross(e_vec, r_vec) < 0:
+    cross_z    = e_vec[0] * r_vec[1] - e_vec[1] * r_vec[0]   # z-component of e_vec × r_vec (2D cross product)
+    if cross_z < 0:
         nu = 360 - nu
 
     return {

@@ -1,5 +1,6 @@
 const Re = 6.371e6;
 const Mu = 3.986004418e14;
+const MoonRadius = 1.7374e6; // m - Moon's real mean radius (~1,737 km)
 const OMEGA_EARTH = 7.2921150e-5; // rad/s — Earth's rotation rate
 
 // Layer visibility toggles (Ground track / Terminator / Staging markers)
@@ -438,6 +439,18 @@ function toggleManeuverFields() {
   const mode = document.getElementById("maneuver-mode").value;
   document.getElementById("maneuver-fields").style.display = mode === "raise_lower" ? "block" : "none";
   document.getElementById("tli-fields").style.display      = mode === "tli" ? "block" : "none";
+
+  // Reentry currently assumes it starts from a stable circular Earth
+  // orbit — a trans-Earth return from the Moon arrives on a fast,
+  // eccentric approach instead, which produces a physically nonsensical
+  // trajectory if reentry is layered on top (see app.py PHASE 5 comment).
+  const reentryCheckbox = document.getElementById("reentry-enabled");
+  reentryCheckbox.disabled = (mode === "tli");
+  if (mode === "tli" && reentryCheckbox.checked) {
+    reentryCheckbox.checked = false;
+    toggleReentryFields();
+  }
+
   renderFuelAssessment();
 }
 
@@ -544,6 +557,8 @@ async function runSimulation() {
       enabled            : document.getElementById("maneuver-mode").value === "tli",
       target_apoapsis_km : document.getElementById("tli-target-apoapsis").value,
       wait_min           : document.getElementById("tli-wait").value,
+      lunar_orbits       : document.getElementById("tli-lunar-orbits").value,
+      return_to_earth    : document.getElementById("tli-return-earth").checked,
     },
     reentry: {
       enabled : document.getElementById("reentry-enabled").checked,
@@ -634,6 +649,67 @@ const EARTH_COLORSCALE = [
   [0.90, "rgb(70,100,55)"],
   [1.00, "rgb(245,248,250)"],
 ];
+
+// Precomputed LOCAL (centered at origin) sphere shape for the Moon, at
+// its real radius — reused every frame, just offset by the Moon's current
+// position, instead of rebuilding the whole mesh from scratch each time.
+let _moonLocalShape = null;
+function moonLocalShape(n = 24) {
+  if (_moonLocalShape) return _moonLocalShape;
+  const u = linspace(0, 2 * Math.PI, n);
+  const v = linspace(0, Math.PI, n);
+  const x = [], y = [], z = [];
+  for (let vi of v) {
+    const xrow = [], yrow = [], zrow = [];
+    for (let ui of u) {
+      xrow.push(MoonRadius * Math.cos(ui) * Math.sin(vi));
+      yrow.push(MoonRadius * Math.sin(ui) * Math.sin(vi));
+      zrow.push(MoonRadius * Math.cos(vi));
+    }
+    x.push(xrow); y.push(yrow); z.push(zrow);
+  }
+  _moonLocalShape = { x, y, z };
+  return _moonLocalShape;
+}
+
+// Moon-centered view uses a fixed, lunar-appropriate zoom radius rather
+// than the full mission's range — big enough to comfortably frame a LOI/
+// TEI-scale orbit around the Moon (tens of thousands of km), independent
+// of how far away the Moon itself is from Earth.
+const MOON_VIEW_RADIUS = 60e6; // m (~60,000 km)
+
+function setViewCenter(mode) {
+  window._viewCenterMode = mode;
+  if (mode === "free") return;   // stop overriding — leave the camera as the user left it
+
+  const r = window._earthViewR || Re * 1.8;
+  let cx = 0, cy = 0, rad = r;
+  if (mode === "moon" && window._latestMoonXY) {
+    [cx, cy] = window._latestMoonXY;
+    rad = MOON_VIEW_RADIUS;
+  }
+  Plotly.relayout("plot3d", {
+    "scene.xaxis.range": [cx - rad, cx + rad],
+    "scene.yaxis.range": [cy - rad, cy + rad],
+    "scene.zaxis.range": [-rad, rad],
+  });
+}
+
+function moonSphereAt(cx, cy) {
+  const shape = moonLocalShape();
+  const x = shape.x.map(row => row.map(v => v + cx));
+  const y = shape.y.map(row => row.map(v => v + cy));
+  return {
+    type: "surface", x, y, z: shape.z,
+    surfacecolor: shape.z.map(row => row.map(_ => 0.55)), // flat light-grey, no markings
+    colorscale: [[0, "rgb(170,170,170)"], [1, "rgb(210,210,210)"]],
+    cmin: 0, cmax: 1,
+    showscale: false, opacity: 1,
+    lighting: { ambient: 0.35, diffuse: 0.75, specular: 0.05, roughness: 0.9 },
+    hoverinfo: "skip",
+    name: "Moon",
+  };
+}
 
 function earthSphere(n = 90) {
   const u = linspace(0, 2 * Math.PI, n);
@@ -933,8 +1009,11 @@ function buildPlot(data) {
   window._trajIdx   = traces.length - 2;
   window._rocketIdx = traces.length - 1;
 
-  // Moon — reference orbit path (static circle) + a marker that moves
-  // along it per frame, same pattern as the rocket marker above.
+  // Moon — reference orbit path (static circle) + a real-scale sphere
+  // that moves along it per frame, same pattern as the rocket marker
+  // above but as a proper surface (not a fixed-pixel marker, which
+  // doesn't scale with the 3D data and made the Moon look bigger than
+  // Earth regardless of actual distance/zoom).
   if (d.moon_orbit_x && d.moon_orbit_x.length > 0) {
     traces.push({
       type: "scatter3d", mode: "lines",
@@ -943,14 +1022,24 @@ function buildPlot(data) {
       name: "Moon orbit (circular approx.)",
       hoverinfo: "skip",
     });
+    traces.push(moonSphereAt(d.moon_x[0], d.moon_y[0]));
+    window._moonIdx = traces.length - 1;
+
+    // Trajectory relative to the Moon — the absolute (Earth-frame) path
+    // during a lunar orbit looks like a spirograph, since it mixes the
+    // spacecraft's small loop around the Moon with the Moon's own much
+    // larger motion around Earth. Subtracting the Moon's position at each
+    // point (then re-adding the Moon's CURRENT position, so it's drawn
+    // right where the Moon actually is) shows the clean, stable orbit
+    // shape instead — most useful with the Moon-centered camera view.
     traces.push({
-      type: "scatter3d", mode: "markers",
-      x: [d.moon_x[0]], y: [d.moon_y[0]], z: [0],
-      marker: { color: "rgb(200,200,200)", size: 14, symbol: "circle" },
-      name: "Moon",
+      type: "scatter3d", mode: "lines",
+      x: [], y: [], z: [],
+      line: { color: "rgb(120,220,255)", width: 2 },
+      name: "Trajectory (relative to Moon)",
       hoverinfo: "skip",
     });
-    window._moonIdx = traces.length - 1;
+    window._moonRelTrajIdx = traces.length - 1;
   }
 
   const orbitX = d.final_orbit_x || d.park_orbit_x || [];
@@ -967,6 +1056,12 @@ function buildPlot(data) {
     ? Math.max(...allX.map(Math.abs), ...allY.map(Math.abs)) * 1.3
     : Re * 1.8;
   const r = Math.max(maxR, Re * 1.5);
+  window._earthViewR = r;
+  window._hasMoon = !!(d.moon_orbit_x && d.moon_orbit_x.length > 0);
+  window._viewCenterMode = "earth";
+  window._latestMoonXY = null;
+  window._loiFrameIdx = undefined;
+  window._teiFrameIdx = undefined;
 
   const layout = {
     paper_bgcolor: "black",
@@ -1019,20 +1114,76 @@ function buildControls(data) {
   const btnStyle = `
     background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15);
     color: #e2e8f0; border-radius: 6px; padding: 5px 12px;
-    font-size: 12px; font-weight: 600; cursor: pointer; transition: background 0.15s;
+    font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.15s;
   `;
+  // Visually distinct "this one is currently selected" state — a bit
+  // bigger and brighter, so at a glance you can tell e.g. "×5 + Moon" is
+  // what's currently active, not just hover which button you clicked last.
+  const btnStyleActive = `
+    background: rgba(79,195,247,0.35); border: 1px solid rgba(79,195,247,0.9);
+    color: #ffffff; border-radius: 6px; padding: 7px 15px;
+    font-size: 13px; font-weight: 700; cursor: pointer; transition: all 0.15s;
+    transform: scale(1.05);
+  `;
+
+  // Speed buttons + Pause all belong to one "playback state" group — only
+  // one of them is ever active: whichever speed is currently playing, or
+  // Pause when nothing is.
+  const playbackBtns = [];
+  function setActivePlaybackBtn(btn) {
+    playbackBtns.forEach(b => { b.style.cssText = btnStyle; });
+    btn.style.cssText = btnStyleActive;
+  }
 
   [["▶ ×1", 1], ["▶ ×5", 5], ["▶ ×20", 20], ["▶ ×50", 50], ["▶ ×100", 100], ["▶ ×150", 150], ["▶ ×200", 200]].forEach(([label, spd]) => {
     const b = document.createElement("button");
     b.textContent = label; b.style.cssText = btnStyle;
-    b.onclick = () => { animSpeed = spd; startAnim(); };
+    b.onclick = () => { animSpeed = spd; startAnim(); setActivePlaybackBtn(b); };
     bar.appendChild(b);
+    playbackBtns.push(b);
   });
 
   const pause = document.createElement("button");
-  pause.textContent = "⏸ Pause"; pause.style.cssText = btnStyle;
-  pause.onclick = stopAnim;
+  pause.textContent = "⏸ Pause"; pause.style.cssText = btnStyleActive;   // active by default — the sim starts paused
+  pause.onclick = () => { stopAnim(); setActivePlaybackBtn(pause); };
   bar.appendChild(pause);
+  playbackBtns.push(pause);
+  window._pauseBtn = pause;
+  window._setActivePlaybackBtn = setActivePlaybackBtn;
+
+  // View-center controls: Earth (default, fixed full-mission view), Moon
+  // (only offered when this mission actually involves the Moon — zooms in
+  // to a lunar-appropriate scale and tracks it as it orbits), or Free
+  // (stop overriding the camera/axis ranges, so the user's own
+  // zoom/pan/rotate via mouse sticks instead of being reset every frame).
+  // Same "only one active at a time" treatment as the playback group above.
+  const viewBtnExtra = " margin-left: 6px;";
+  const viewBtns = [];
+  function setActiveViewBtn(btn) {
+    viewBtns.forEach(b => { b.style.cssText = btnStyle + viewBtnExtra; });
+    btn.style.cssText = btnStyleActive + viewBtnExtra;
+  }
+
+  const earthBtn = document.createElement("button");
+  earthBtn.textContent = "🌍 Earth"; earthBtn.style.cssText = btnStyleActive + viewBtnExtra;   // active by default
+  earthBtn.onclick = () => { setViewCenter("earth"); setActiveViewBtn(earthBtn); };
+  bar.appendChild(earthBtn);
+  viewBtns.push(earthBtn);
+
+  if (window._hasMoon) {
+    const moonBtn = document.createElement("button");
+    moonBtn.textContent = "🌙 Moon"; moonBtn.style.cssText = btnStyle;
+    moonBtn.onclick = () => { setViewCenter("moon"); setActiveViewBtn(moonBtn); };
+    bar.appendChild(moonBtn);
+    viewBtns.push(moonBtn);
+  }
+
+  const freeBtn = document.createElement("button");
+  freeBtn.textContent = "🔓 Free"; freeBtn.style.cssText = btnStyle;
+  freeBtn.onclick = () => { setViewCenter("free"); setActiveViewBtn(freeBtn); };
+  bar.appendChild(freeBtn);
+  viewBtns.push(freeBtn);
+
 
   const slider = document.createElement("input");
   slider.type = "range"; slider.min = 0;
@@ -1040,6 +1191,7 @@ function buildControls(data) {
   slider.style.cssText = "width: 200px; accent-color: #4fc3f7; cursor: pointer;";
   slider.oninput = function () {
     stopAnim();
+    setActivePlaybackBtn(pause);
     frameIdx = parseInt(this.value);
     updateFrame(data, frameIdx);
   };
@@ -1065,6 +1217,9 @@ function startAnim() {
       animTimer = setTimeout(tick, 16);
     } else {
       isPlaying = false;
+      if (window._pauseBtn && window._setActivePlaybackBtn) {
+        window._setActivePlaybackBtn(window._pauseBtn);
+      }
     }
   }
   tick();
@@ -1088,13 +1243,56 @@ function updateFrame(data, i) {
     z: [[0]],
   }, [window._rocketIdx]);
 
-  // Moon marker, moving along its own orbit
+  // Moon sphere, moving along its own orbit — rebuild the mesh offset by
+  // the current position (the precomputed local shape keeps this cheap).
   if (window._moonIdx !== undefined && data.moon_x) {
+    const shape = moonLocalShape();
+    const cx = data.moon_x[i], cy = data.moon_y[i];
     Plotly.restyle("plot3d", {
-      x: [[data.moon_x[i]]],
-      y: [[data.moon_y[i]]],
-      z: [[0]],
+      x: [shape.x.map(row => row.map(v => v + cx))],
+      y: [shape.y.map(row => row.map(v => v + cy))],
     }, [window._moonIdx]);
+    window._latestMoonXY = [cx, cy];
+    if (window._viewCenterMode === "moon") {
+      Plotly.relayout("plot3d", {
+        "scene.xaxis.range": [cx - MOON_VIEW_RADIUS, cx + MOON_VIEW_RADIUS],
+        "scene.yaxis.range": [cy - MOON_VIEW_RADIUS, cy + MOON_VIEW_RADIUS],
+        "scene.zaxis.range": [-MOON_VIEW_RADIUS, MOON_VIEW_RADIUS],
+      });
+    }
+
+    // Trajectory relative to the Moon, from lunar orbit insertion onward —
+    // capped at t_tei (if a return burn happened), since "position relative
+    // to the Moon" stops meaning anything once the spacecraft has escaped
+    // and is heading back to Earth (those points would otherwise draw a
+    // stray line reaching far from the Moon, since they'd be huge
+    // Earth-return-scale offsets re-added at the Moon's current spot).
+    if (window._moonRelTrajIdx !== undefined && data.summary && data.summary.t_loi != null) {
+      if (window._loiFrameIdx === undefined) {
+        let idx = data.t.findIndex(t => t >= data.summary.t_loi);
+        window._loiFrameIdx = idx < 0 ? 0 : idx;
+      }
+      if (window._teiFrameIdx === undefined) {
+        if (data.summary.t_tei != null) {
+          let idx = data.t.findIndex(t => t >= data.summary.t_tei);
+          window._teiFrameIdx = idx < 0 ? data.t.length - 1 : idx;
+        } else {
+          window._teiFrameIdx = null;   // no return burn — never caps, stays in lunar orbit
+        }
+      }
+      const startK = window._loiFrameIdx;
+      const endK = window._teiFrameIdx === null ? i : Math.min(i, window._teiFrameIdx);
+      if (endK >= startK) {
+        const relX = [], relY = [];
+        for (let k = startK; k <= endK; k++) {
+          relX.push(data.x[k] - data.moon_x[k] + cx);
+          relY.push(data.y[k] - data.moon_y[k] + cy);
+        }
+        Plotly.restyle("plot3d", {
+          x: [relX], y: [relY], z: [relX.map(_ => 0)],
+        }, [window._moonRelTrajIdx]);
+      }
+    }
   }
 
   // Ground track + sub-satellite point, kept in sync with the trajectory
@@ -1165,10 +1363,10 @@ function updateHUD(data, i) {
       phase = "Circular orbit";
     } else if (s.t_loi !== null && s.t_loi !== undefined && t < s.t_loi) {
       phase = "Trans-lunar coast";
-    } else if (s.t_tei !== null && s.t_tei !== undefined && t < s.t_tei) {
-      phase = "Lunar orbit";
-    } else if (s.t_tei !== null && s.t_tei !== undefined) {
+    } else if (s.t_tei !== null && s.t_tei !== undefined && t >= s.t_tei) {
       phase = "Trans-Earth coast";
+    } else if (s.t_loi !== null && s.t_loi !== undefined) {
+      phase = "Lunar orbit";
     } else if (s.t_tli !== null && s.t_tli !== undefined) {
       phase = "Trans-lunar coast";
     } else {
@@ -1260,6 +1458,87 @@ function updateHUD(data, i) {
 // ─────────────────────────────────────────────
 // Summary tables
 // ─────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// Mission report (PDF)
+// ─────────────────────────────────────────────
+async function generateMissionReport(btn) {
+  if (!simData || !simData.summary) {
+    alert("Run a simulation first — there's nothing to report yet.");
+    return;
+  }
+  const originalLabel = btn.textContent;
+  btn.textContent = "Generating…";
+  btn.disabled = true;
+
+  try {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: "pt", format: "a4" });
+    const pageW = doc.internal.pageSize.getWidth();
+    const margin = 40;
+    let y = margin;
+
+    // ── Header ──
+    const vehicleName = document.getElementById("vehicle-name").value || "Unnamed vehicle";
+    const payloadKg   = document.getElementById("payload-mass").value;
+    doc.setFontSize(18); doc.setFont(undefined, "bold");
+    doc.text("Mission Report", margin, y); y += 22;
+    doc.setFontSize(11); doc.setFont(undefined, "normal");
+    doc.text(`Vehicle: ${vehicleName}   |   Payload: ${Number(payloadKg).toLocaleString("en-US")} kg`, margin, y); y += 16;
+    doc.text(`Generated: ${new Date().toLocaleString()}`, margin, y); y += 24;
+
+    // ── Trajectory snapshot ──
+    const imgData = await Plotly.toImage("plot3d", { format: "png", width: 1000, height: 640 });
+    const imgW = pageW - margin * 2;
+    const imgH = imgW * (640 / 1000);
+    doc.addImage(imgData, "PNG", margin, y, imgW, imgH);
+    y += imgH + 24;
+
+    // ── Helper: render a [label, value] row table, paging as needed ──
+    function renderTable(title, rows) {
+      if (!rows || rows.length === 0) return;
+      if (y > doc.internal.pageSize.getHeight() - 100) { doc.addPage(); y = margin; }
+      doc.setFontSize(13); doc.setFont(undefined, "bold");
+      doc.text(title, margin, y); y += 16;
+      doc.setFontSize(10); doc.setFont(undefined, "normal");
+      for (const [k, v] of rows) {
+        if (y > doc.internal.pageSize.getHeight() - 40) { doc.addPage(); y = margin; }
+        if (v === "") {
+          // section divider row (e.g. "── Hohmann transfer ──")
+          y += 6;
+          doc.setFont(undefined, "bold");
+          doc.text(String(k).replace(/─/g, "").trim(), margin, y);
+          doc.setFont(undefined, "normal");
+          y += 14;
+          continue;
+        }
+        doc.text(String(k), margin, y);
+        doc.text(String(v), margin + 260, y);
+        y += 14;
+      }
+      y += 12;
+    }
+
+    renderTable("Mission Summary", window._lastSummaryRows);
+    renderTable("Orbital Elements", window._lastOrbitalRows);
+
+    if (simData.burn_markers && simData.burn_markers.length > 0) {
+      const burnRows = simData.burn_markers.map(b => [
+        b.label, `${b.dv >= 0 ? "+" : ""}${b.dv.toFixed(0)} m/s${b.retrograde ? " (retrograde)" : ""}`,
+      ]);
+      renderTable("Burn Sequence", burnRows);
+    }
+
+    const safeName = vehicleName.replace(/[^a-z0-9]+/gi, "_").toLowerCase();
+    doc.save(`mission_report_${safeName || "vehicle"}.pdf`);
+  } catch (err) {
+    console.error("Mission report generation failed:", err);
+    alert("Couldn't generate the report — check the browser console for details.");
+  } finally {
+    btn.textContent = originalLabel;
+    btn.disabled = false;
+  }
+}
+
 function fillSummary(s) {
   const stageRows = (s.stage_burnouts || []).map(
     (tb, i) => [`Stage ${i + 1} burnout`, tb.toFixed(1) + " s"]
@@ -1329,6 +1608,9 @@ function fillSummary(s) {
       );
     }
     summaryRows.push(["Note", "Simplified circular, coplanar Moon orbit — real Earth-return targeting not precisely aimed"]);
+    if (s.reentry_skipped_tli) {
+      summaryRows.push(["⚠ Reentry skipped", "not modeled after a lunar return — arrival trajectory isn't a stable orbit"]);
+    }
   }
   if (s.t_reentry !== null && s.t_reentry !== undefined) {
     summaryRows.push(["── Reentry ──", ""]);
@@ -1367,4 +1649,7 @@ function fillSummary(s) {
   fill("orbital-table", orbitalRows);
   document.getElementById("summary-card").style.display = "block";
   document.getElementById("orbital-card").style.display = "block";
+
+  window._lastSummaryRows = summaryRows;
+  window._lastOrbitalRows = orbitalRows;
 }

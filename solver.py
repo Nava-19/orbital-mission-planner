@@ -203,13 +203,21 @@ def run_coast(state0, t_start, t_end, dt=10.0):
     return solution.t, solution.y
 
 
-def run_reentry(state0, t_start, t_end, mass, Cd=1.2, A=10.0, dt=1.0):
+def run_reentry(state0, t_start, t_end, mass, Cd=1.2, A=10.0, dt=60.0):
     """Propagate an unpowered payload through the atmosphere after deorbit.
 
     Unlike ``run_coast``, this retains atmospheric drag (with the atmosphere
     co-rotating with Earth) and stops at the surface.  It is deliberately a
     point-mass, ballistic reentry model: heating, lift and parachutes are
     outside this simulator's current scope.
+
+    ``dt`` is a max-step CEILING, not a fixed step — RK45's own adaptive
+    error control already shrinks the step automatically once drag becomes
+    significant, so this only needs to be small enough to not overshoot the
+    thin-to-thick atmosphere transition, not so small that a multi-day
+    vacuum coast (e.g. a translunar return) takes hundreds of thousands of
+    needless tiny steps before anything aerodynamically interesting even
+    starts happening.
     """
     def reentry_dynamics(t, state):
         x, y, vx, vy = state
