@@ -152,13 +152,20 @@ tests/             Automated test suite (pytest) - atmosphere model,
                    orbital elements, Hohmann transfer, energy/angular
                    momentum conservation, reentry impact detection
 .github/workflows/ CI - runs the test suite on every push/PR
-docs/               Demo assets
+docs/               Demo assets, technical reference document
 ```
+
+## Technical reference
+
+A complete engineering document covering every equation, reference frame,
+unit convention, integration method, and deliberate simplification used in
+the simulator: [`docs/TECHNICAL_REFERENCE.md`](docs/TECHNICAL_REFERENCE.md).
 
 ## Known limitations
 
 Documented in detail, with the reasoning behind each simplification, in
-[`ToDoList.md`](ToDoList.md). The short version:
+[`ToDoList.md`](ToDoList.md) and the
+[Technical Reference](docs/TECHNICAL_REFERENCE.md). The short version:
 
 - **2D, single-plane physics** - no orbital inclination or 3D geometry.
 - **Moon**: circular, coplanar, arbitrary phase at mission start - not real
