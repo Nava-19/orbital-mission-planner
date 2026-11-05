@@ -1,197 +1,158 @@
-# 🚀 Mission Planner - Rocket Launch & Lunar Mission Simulator
+
+# 🚀 Orbital Mission Planner
 
 [![Tests](https://github.com/Nava-19/orbital-mission-planner/actions/workflows/tests.yml/badge.svg)](https://github.com/Nava-19/orbital-mission-planner/actions/workflows/tests.yml)
 
-A rocket launch and mission-design simulator built on a custom orbital
-mechanics and atmospheric flight physics engine (Python), with an
-interactive 3D web interface (Flask + Plotly). Configure a multi-stage
-vehicle, fly it from liftoff through orbital insertion, and optionally on to
-a full lunar mission - trans-lunar injection, lunar orbit insertion, and a
-targeted return to Earth - all driven by real orbital mechanics, not
-scripted animation.
+A Python-based orbital mission and rocket launch simulator built around a custom orbital mechanics and atmospheric flight physics engine, with an interactive 3D web interface using Flask and Plotly.
 
-![demo](docs/Demo_26-11-05.gif)
+The project explores multi-stage rocket ascent, closed-loop guidance, orbital insertion, orbital transfers, Earth-Moon trajectories and atmospheric reentry through numerical integration and physical modelling.
 
-> This project intentionally stays inside orbital mechanics and atmospheric
-> flight dynamics. Vehicle aerodynamic coefficients (`Cd`, drag area) are
-> user-supplied inputs, not computed from first principles - a companion CFD
-> project is planned to fill that gap by generating those coefficients for
-> imported vehicle geometries (see [Roadmap](#roadmap)).
+> 🚧 **Work in Progress**
+>
+> This is an ongoing personal engineering project. The simulator is still under development, and its models have not yet undergone a complete independent validation campaign. It is intended as an educational and engineering portfolio project, not as an operational mission-planning tool.
 
-## ✨ What it does
+## 🎬 Demo
 
-### Ascent & guidance
-- **Full 2D physics engine**: numerical integration (`scipy.solve_ivp`) of
-  gravity, thrust, atmospheric drag, and Earth's rotation, for
-  user-configured multi-stage vehicles (arbitrary stage count, propellant
-  type, thrust, Isp, drag).
-- **Real rocket presets** (Falcon 9, Falcon Heavy, Ariane 5 ECA, Saturn V)
-  with their real stage masses/thrust/Isp, or fully custom vehicles.
-- **Closed-loop ascent guidance (PEG)** - a simplified Powered Explicit
-  Guidance algorithm that re-solves the steering law every ~20s of flight
-  from the vehicle's actual state (numerical shooting via
-  `scipy.optimize.least_squares`, not a fixed pitch program) to hit the
-  target parking orbit precisely, correcting itself in flight.
+### LEO-to-GEO Orbital Transfer
 
-### Orbital operations
-- Direct insertion or an automatic **Hohmann transfer** to a higher target
-  orbit (LEO/SSO/MEO/GEO presets or a custom altitude).
-- A shared **OMS Δv budget**: circularization, the Hohmann transfer,
-  optional maneuvers, and the Moon-mission burns all draw from one
-  user-configurable propellant budget for the payload/upper stage,
-  clipped and reported honestly when it isn't enough - instead of treating
-  every post-ascent burn as free.
-- An optional **raise/lower orbit maneuver** after insertion.
+![Orbital Mission Planner - LEO to GEO transfer](docs/Demo_26-11-05.gif)
 
-### Lunar missions (Trans-Lunar Injection)
-- The Moon is modeled as a **real second gravitational body** (not just a
-  drawn target) - a circular, coplanar orbit computed directly (no external
-  ephemeris dependency), with its gravity included in every phase of the
-  physics engine. The spacecraft genuinely feels it: trajectories
-  measurably deviate from a pure two-body Earth ellipse once nearby.
-- **Phase-synced arrival**: the Moon's orbital phase is solved so it's
-  actually at the transfer ellipse's apoapsis when the spacecraft gets
-  there, instead of an arbitrary, unrelated position.
-- **Lunar Orbit Insertion (LOI)**: a genuine vector-based capture burn
-  (redirects to a truly tangential velocity relative to the Moon, not just
-  a magnitude scale) for a real, stable, bound lunar orbit - verified to
-  stay gravitationally bound over multiple laps, visibly perturbed
-  lap-to-lap by Earth's gravity, as a real three-body orbit should be.
-- A configurable number of lunar orbits, then an optional
-  **Trans-Earth Injection (TEI)** - a numerical search (grid scan +
-  least-squares refinement, evaluated against real Earth+Moon-gravity
-  coasts, not an instantaneous two-body estimate) over the departure timing
-  and burn size that targets a shallow, Apollo-like atmospheric entry angle
-  (≈ -6° at the standard 122 km entry interface) - so the mission can hand
-  off directly into ballistic reentry physics, no extra burns needed.
+The demonstration shows an orbital transfer from a parking orbit to GEO, including the transfer trajectory and final orbit.
 
-### Reentry
-- A realistic **3-burn deorbit sequence** from a high parking orbit: return
-  to a low parking altitude, circularize there, then a small, realistic
-  atmospheric-entry burn - instead of one unrealistic direct dive.
-- **Ballistic descent with drag**, using the same atmosphere model as
-  ascent, through to surface impact detection.
+## ✨ Main Features
 
-### Atmosphere model
-- ISA polytropic model (troposphere + lower stratosphere, 0–20 km) for
-  physically-derived accuracy where temperature genuinely varies with
-  altitude, handing off to a **PCHIP-smoothed fit through the standard
-  reference exponential atmosphere table** (Vallado, *Fundamentals of
-  Astrodynamics and Applications*) from 20 km through 1,000 km - matching
-  the reference table exactly at every published node, with no artificial
-  jumps in local scale height between them (see
-  [Validation](#validation-against-reference-data)).
+### Ascent & Guidance
 
-### Visualization & reporting
-- Interactive 3D trajectory view (Plotly) with ground track, day/night
-  terminator, staging event markers, and prograde/retrograde Δv burn
-  markers for every burn in the mission.
-- Selectable camera framing: Earth-centered, Moon-centered (only offered
-  when a mission actually goes there), or free camera.
-- Adjustable playback speed (×1 to ×200) and a scrub bar.
-- One-click **PDF mission report** (client-side, via `jsPDF` +
-  `Plotly.toImage` - no server-side rendering dependency) with the
-  trajectory view, mission summary, orbital elements, and full burn
-  sequence.
+- **2D physics engine:** numerical integration using `scipy.solve_ivp`, modelling gravity, thrust, atmospheric drag and Earth's rotation.
+- **Multi-stage vehicles:** configurable stage count, propellant type, thrust, specific impulse and aerodynamic parameters.
+- **Rocket presets:** Falcon 9, Falcon Heavy, Ariane 5 ECA and Saturn V, alongside fully custom vehicles.
+- **Closed-loop PEG guidance:** a simplified Powered Explicit Guidance algorithm that repeatedly resolves the steering law from the vehicle's current state using numerical shooting (`scipy.optimize.least_squares`), rather than following a fixed pitch program.
 
-## Validation against reference data
+### Orbital Operations
 
-Simplified simulators are easy to build and easy to get subtly wrong. A few
-concrete checks run against this engine, rather than "it looks right":
+- Direct orbital insertion or automatic Hohmann transfer to a higher target orbit.
+- Target orbit presets including LEO, SSO, MEO and GEO, with custom altitude options.
+- **Shared OMS Δv budget:** circularization, Hohmann transfers, optional orbital maneuvers and lunar mission burns draw from a common user-configurable propulsion budget for the payload/upper stage.
+- Optional orbit-raising and orbit-lowering maneuvers after insertion.
 
-| Quantity | This simulator | Reference | Source |
-|---|---|---|---|
-| Atmospheric density, every table node 20–1000 km | exact match | Vallado exponential atmosphere table | Vallado, *Fundamentals of Astrodynamics and Applications* |
-| Falcon 9 ascent max dynamic pressure | ≈ 33 kPa | ~30–40 kPa for real Falcon 9 flights | public flight data |
-| Trans-Lunar Injection Δv (LEO → Moon distance) | ≈ 3.08 km/s | ~3.1–3.2 km/s | historical TLI burns |
-| Lunar Orbit Insertion Δv | ≈ 0.7–1.0 km/s (orbit-size dependent) | ≈ 1.0 km/s (Apollo LOI burns) | Apollo mission reports |
-| Reentry flight path angle at 122 km entry interface | tuned to ≈ -6° to -8° | ≈ -6.5° (Apollo entry corridor) | Apollo mission reports |
+### Lunar Missions
 
-None of these were curve-fit to hit these numbers - they fell out of the
-underlying physics (thrust/Isp/mass integration, vis-viva, patched
-two-body dynamics) once it was implemented correctly, which is what makes
-them a meaningful check rather than a tautology.
+- **Earth-Moon gravitational model:** the Moon is represented as a second gravitational body following a simplified circular, coplanar orbit. Its gravity is included in spacecraft propagation.
+- **Phase-synchronized lunar arrival:** the Moon's orbital phase is solved to align its position with the spacecraft's planned arrival.
+- **Trans-Lunar Injection (TLI):** transfer from Earth orbit towards the Moon.
+- **Lunar Orbit Insertion (LOI):** vector-based capture maneuver to establish a bound lunar orbit.
+- **Trans-Earth Injection (TEI):** optional return trajectory, using numerical targeting of atmospheric entry conditions.
 
-## Getting started
+### Atmospheric Reentry
 
-```bash
-git clone git@github.com:Nava-19/orbital-mission-planner.git
-cd orbital-mission-planner
-pip install -r requirements.txt
-python app.py
+- Multi-burn deorbit sequence from a high parking orbit.
+- Ballistic descent with atmospheric drag.
+- Atmospheric impact detection.
+
+### Atmosphere Model
+
+- ISA polytropic atmosphere model for the troposphere and lower stratosphere (0–20 km).
+- PCHIP-smoothed interpolation of the reference exponential atmosphere table from 20 km to 1,000 km.
+- Atmospheric density matches the reference table at its published altitude nodes, based on Vallado's *Fundamentals of Astrodynamics and Applications*.
+
+### Visualization & Reporting
+
+- Interactive 3D trajectory visualization using Plotly.
+- Ground track and day/night terminator.
+- Staging events and prograde/retrograde Δv maneuver markers.
+- Selectable Earth-centered, Moon-centered and free camera views.
+- Adjustable playback speed (×1 to ×200) and trajectory scrubbing.
+- One-click PDF mission report generated client-side using `jsPDF` and `Plotly.toImage`, including trajectory visualization, mission summary, orbital elements and burn sequence.
+
+## 🧪 Validation Against Reference Data
+
+The simulator includes engineering checks against analytical results and published reference data. These checks help assess the physical plausibility of the models, but do not replace independent validation against a high-fidelity mission analysis tool.
+
+| Quantity | Simulator result | Reference |
+|---|---:|---:|
+| Atmospheric density at reference table nodes (20–1,000 km) | Exact match | Vallado exponential atmosphere table |
+| Falcon 9 ascent maximum dynamic pressure | ≈ 33 kPa | Approximately 30–40 kPa for real Falcon 9 flights |
+| Trans-Lunar Injection Δv (LEO to Moon distance) | ≈ 3.08 km/s | Approximately 3.1–3.2 km/s |
+| Lunar Orbit Insertion Δv | ≈ 0.7–1.0 km/s, depending on orbit size | Approximately 1.0 km/s for Apollo LOI burns |
+| Reentry flight path angle at 122 km entry interface | ≈ −6° to −8° | Approximately −6.5° Apollo entry corridor |
+
+These results emerge from the implemented physical models and numerical calculations. They are useful reference checks, not proof of complete physical fidelity.
+
+Additional automated tests cover orbital elements, Hohmann transfers, energy and angular momentum conservation, atmospheric modelling and reentry impact detection.
+
+**Independent trajectory comparison with NASA GMAT remains planned work.** The reference checks above should not be interpreted as completed GMAT validation.
+
+## 🏗️ Project Structure
+
+```text
+orbital-mission-planner/
+├── .github/
+│   └── workflows/       # GitHub Actions CI
+├── docs/                # Demo assets and technical reference
+│   └── Demo_26-11-05.gif
+├── static/
+│   ├── main.js          # Frontend, Plotly visualization and PDF report
+│   └── style.css
+├── templates/           # Flask/Jinja templates
+├── tests/               # Automated test suite
+├── app.py               # Flask application and mission orchestration
+├── vehicle.py           # Rocket/stage models and PEG guidance
+├── solver.py            # Equations of motion and numerical integration
+├── orbital.py           # Orbital mechanics and transfer calculations
+├── environment.py       # Atmospheric density and gravity models
+├── constants.py         # Physical constants
+├── requirements.txt
+├── requirements-dev.txt
+├── ToDoList.md           # Roadmap and implementation notes
+├── LICENSE
+└── README.md
 ```
 
-Then open `http://localhost:5000`, configure a vehicle and target orbit
-(or pick a preset), and launch.
+## 📚 Technical Documentation
 
-### Running the tests
+The technical reference documents the equations, reference frames, unit conventions, numerical integration methods and modelling assumptions used throughout the simulator.
 
-```bash
-pip install -r requirements-dev.txt
-pytest tests/ -v
-```
+- [Technical Reference](docs/TECHNICAL_REFERENCE.md)
+- [Development Roadmap and ToDo List](ToDoList.md)
 
-## Project structure
+## ⚠️ Current Limitations
 
-```
-app.py            Flask endpoint - orchestrates a full mission (ascent,
-                   orbital insertion, optional maneuver/TLI/reentry) and
-                   assembles the JSON payload the frontend renders
-vehicle.py         Rocket/Stage classes, PEG closed-loop ascent guidance
-solver.py          Equations of motion, numerical integration (ascent,
-                   coast, ballistic reentry with drag)
-orbital.py         Orbital elements, Hohmann transfer, circularization,
-                   Moon position/velocity/gravity
-environment.py     Atmosphere density model, gravity
-constants.py       Physical constants (Earth, Moon, atmosphere)
-templates/         Flask/Jinja page shell
-static/main.js     Frontend: vehicle config UI, 3D visualization (Plotly),
-                   animation, PDF mission report
-static/style.css   Styling
-tests/             Automated test suite (pytest) - atmosphere model,
-                   orbital elements, Hohmann transfer, energy/angular
-                   momentum conservation, reentry impact detection
-.github/workflows/ CI - runs the test suite on every push/PR
-docs/               Demo assets, technical reference document
-```
+The simulator deliberately uses simplified models in several areas. These assumptions define the current scope of the project:
 
-## Technical reference
+- **2D dynamics:** the physics engine operates in a single orbital plane. It does not model arbitrary orbital inclinations or fully three-dimensional spacecraft dynamics.
+- **Simplified lunar ephemeris:** the Moon follows a circular, coplanar orbit with an arbitrary initial phase, rather than a real ephemeris.
+- **Impulsive maneuvers:** orbital burns are modelled as instantaneous velocity changes, not finite-duration engine burns.
+- **Ballistic reentry:** the reentry model includes atmospheric drag but does not model aerodynamic lift, thermal protection or parachute dynamics.
+- **Aerodynamic coefficients:** drag coefficient (`Cd`) and reference area are user-supplied inputs, not computed from vehicle geometry.
 
-A complete engineering document covering every equation, reference frame,
-unit convention, integration method, and deliberate simplification used in
-the simulator: [`docs/TECHNICAL_REFERENCE.md`](docs/TECHNICAL_REFERENCE.md).
+These simplifications are documented in the [Technical Reference](docs/TECHNICAL_REFERENCE.md) and [ToDoList](ToDoList.md).
 
-## Known limitations
+## 🛠️ Technology Stack
 
-Documented in detail, with the reasoning behind each simplification, in
-[`ToDoList.md`](ToDoList.md) and the
-[Technical Reference](docs/TECHNICAL_REFERENCE.md). The short version:
+- **Python:** NumPy, SciPy, Flask
+- **Numerical methods:** ODE integration and nonlinear least-squares optimization
+- **Visualization:** Plotly.js
+- **Frontend:** JavaScript, HTML and CSS
+- **Reporting:** jsPDF
+- **Testing:** pytest and GitHub Actions
 
-- **2D, single-plane physics** - no orbital inclination or 3D geometry.
-- **Moon**: circular, coplanar, arbitrary phase at mission start - not real
-  ephemeris data (a Skyfield-based upgrade is a planned follow-up).
-- **Impulsive burns** - every maneuver is an instantaneous Δv, not a
-  finite-duration throttled burn.
-- **Point-mass ballistic reentry** - no lift, heating, or parachute model.
-- **Vehicle drag coefficients are user-supplied inputs**, not derived from
-  vehicle geometry (see the CFD companion project note above).
+## 🗺️ Roadmap
 
-## Roadmap
+Planned improvements include:
 
-See [`ToDoList.md`](ToDoList.md) for the full, itemized roadmap and
-implementation notes. At a glance:
+- Independent trajectory validation using NASA GMAT.
+- Higher-fidelity orbital perturbation models, including J2.
+- More realistic lunar ephemerides.
+- Mission configuration save/load functionality.
+- Ground-station visibility analysis.
+- A companion CFD workflow using SU2/OpenFOAM to estimate aerodynamic coefficients from vehicle geometries.
 
-- Short term: J2 perturbation, save/load mission configs, ground-station
-  visibility windows.
-- Longer term, as a **separate companion project**: a CFD pipeline
-  (SU2/OpenFOAM) to compute real aerodynamic coefficients for imported
-  rocket/vehicle geometries, feeding back into this simulator's drag model
-  instead of user-supplied `Cd`/area values.
+See [ToDoList.md](ToDoList.md) for the detailed roadmap and implementation notes.
 
-## Tech stack
+## 📄 License
 
-Python (Flask, NumPy, SciPy) · Plotly.js · jsPDF
+MIT License. See [LICENSE](LICENSE).
 
-## License
+---
 
-MIT - see [`LICENSE`](LICENSE).
+**Developed as a personal aerospace engineering project**, focused on orbital mechanics, flight dynamics, numerical simulation and mission analysis.
