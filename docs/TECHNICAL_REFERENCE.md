@@ -67,11 +67,11 @@ quantities are in radians unless explicitly noted as degrees in output.
 
 | Symbol | Value | Description | Source |
 |---|---|---|---|
-| $M_E$     | 5.9722 × 10²⁴ kg       | Earth's mass | IAU |
+| $M_E$     | 5.9722 × 10²⁴ kg       | Earth's nominal mass (informational) | IAU |
 | $G$       | 6.67430 × 10⁻¹¹ N·m²/kg² | Universal gravitational constant | CODATA |
 | $R_E$     | 6.371 × 10⁶ m          | Earth's mean radius | WGS-84 (rounded) |
 | $g_0$     | 9.80665 m/s²            | Standard gravity (ISA defined) | ISO 2533 |
-| $\mu$     | 3.986004418 × 10¹⁴ m³/s² | Earth's gravitational parameter ($G \cdot M_E$) | EGM-96 |
+| $\mu$     | 3.986004418 × 10¹⁴ m³/s² | Earth's standard gravitational parameter (single source of truth) | EGM-96 |
 | $\omega_E$| 7.2921150 × 10⁻⁵ rad/s | Earth's angular velocity | IERS |
 | $v_{\mathrm{esc}}$ | 11 186 m/s     | Earth's escape velocity | Derived |
 | $P_{sl}$  | 101 325 Pa              | ISA sea-level pressure | ISO 2533 |
@@ -79,8 +79,7 @@ quantities are in radians unless explicitly noted as degrees in output.
 | $L_{mb}$  | 0.0065 K/m              | Tropospheric lapse rate | ISO 2533 |
 | $R_{air}$ | 287.05 J/(kg·K)         | Specific gas constant (dry air) | — |
 | $H_{tr}$  | 11 000 m                | Tropopause altitude | ISO 2533 |
-| $M_{Moon}$| 7.342 × 10²² kg        | Moon's mass | IAU |
-| $\mu_{Moon}$ | $G \cdot M_{Moon}$ ≈ 4.9048 × 10¹² m³/s² | Moon's gravitational parameter | Derived |
+| $\mu_{Moon}$ | 4.902800066 × 10¹² m³/s² | Moon's standard gravitational parameter (fixed reference) | Reference constant |
 | $r_{Moon}$| 384 400 × 10³ m         | Moon's mean orbital radius | IAU |
 | $T_{Moon}$| 27.321661 × 86400 s     | Moon's sidereal orbital period | IAU |
 
@@ -93,13 +92,25 @@ quantities are in radians unless explicitly noted as degrees in output.
 A **spherically-symmetric, point-mass** model (monopole). No $J_2$ or
 higher-order gravitational harmonics.
 
-$$g(h) = \frac{G \cdot M_E}{(R_E + h)^2}$$
+The gravitational acceleration is defined directly from Earth's standard
+gravitational parameter $\mu$:
+
+$$g(h) = \frac{\mu}{(R_E + h)^2}$$
 
 In vector form (as applied to the state vector):
 
 $$\mathbf{a}_g = -g(h) \cdot \hat{r} = -\frac{\mu}{r^2} \hat{r}$$
 
 where $r = |\mathbf{r}| = \sqrt{x^2 + y^2}$ and $h = r - R_E$.
+
+> **Note on unified gravitational parameter:** Earth's gravitational acceleration
+> in the numerical integrator (`environment.get_gravity`) and all analytical orbital
+> calculations (`orbital.py`, Hohmann transfers, circularization, Keplerian elements,
+> and PEG guidance) use the exact same single source of truth:
+> $\mu = 3.986004418 \times 10^{14} \;\mathrm{m}^3/\mathrm{s}^2$ (EGM-96).
+> The previous dual definition where dynamics used an indirect $G \cdot M_E$
+> has been eliminated to ensure strict physical consistency between numerical
+> propagation and analytical orbit models.
 
 ### 3.2 Moon gravity
 
@@ -112,7 +123,19 @@ $$\mathbf{a}_{Moon} = \frac{\mu_{Moon}}{|\mathbf{r}_{Moon} - \mathbf{r}|^3}(\mat
 A safety guard sets acceleration to zero if the spacecraft-Moon distance falls
 below 1.0 m (degenerate case).
 
-> **Note:** Moon gravity is negligible during the ascent phase (drowned out by
+> **Note on lunar gravitational parameter and model simplifications:**
+> The lunar gravitational parameter is defined directly as a fixed reference
+> constant: $\mu_{Moon} = 4.902800066 \times 10^{12} \;\mathrm{m}^3/\mathrm{s}^2$,
+> rather than being reconstructed from $G \cdot M_{Moon}$.
+> The lunar model in the simulator remains an idealized engineering approximation:
+> - **Point-mass gravity:** Only the direct Newtonian acceleration toward the Moon
+>   is computed; the indirect non-inertial acceleration of the Earth is omitted.
+> - **Circular analytical orbit:** The Moon moves on an idealized circular,
+>   coplanar orbit ($r_{Moon} = 384\,400 \;\mathrm{km}$, $i=0^\circ$, $e=0$).
+> - **No real ephemeris:** Positions are evaluated analytically from elapsed
+>   time and phase offset, without high-fidelity ephemeris kernels (e.g. JPL DE series).
+>
+> Moon gravity is negligible during the ascent phase (drowned out by
 > Earth's gravity by several orders of magnitude), but is the dominant
 > gravitational body during trans-lunar coast and lunar orbit phases. It is
 > included everywhere for physical consistency.

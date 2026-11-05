@@ -10,7 +10,7 @@ a full lunar mission - trans-lunar injection, lunar orbit insertion, and a
 targeted return to Earth - all driven by real orbital mechanics, not
 scripted animation.
 
-![demo](docs/Demo_15-09-26.gif)
+![demo](docs/Demo_26-11-05.gif)
 
 > This project intentionally stays inside orbital mechanics and atmospheric
 > flight dynamics. Vehicle aerodynamic coefficients (`Cd`, drag area) are

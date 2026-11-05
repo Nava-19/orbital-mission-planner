@@ -39,9 +39,9 @@ def test_air_density_sea_level_matches_isa_standard():
 
 def test_gravity_at_sea_level_matches_standard_g0():
     # g0=9.80665 is an internationally DEFINED reference value (a rounded
-    # convention, not literally G*Me/Re² for this project's constants), so
-    # a small (~0.14%) real difference from computing gravity directly via
-    # G*M/R² is expected, physically-derived behavior — not a bug.
+    # convention, not literally Mu/Re² for this project's constants), so
+    # a small (~0.16%) real difference from computing gravity directly via
+    # Mu/Re² is expected, physically-derived behavior — not a bug.
     assert get_gravity(0) == pytest.approx(9.80665, rel=2e-3)
 
 

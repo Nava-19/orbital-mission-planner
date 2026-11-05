@@ -1,10 +1,10 @@
 import numpy as np
 from scipy.interpolate import PchipInterpolator
-from constants import G, Me, Re, Tsl, Lmb, Psl, Rair, Htr, Mu
+from constants import Re, Tsl, Lmb, Psl, Rair, Htr, Mu
 
 def get_gravity(altitude):
-    # Returns gravitational acceleration at a given altitude
-    return (G * Me) / (altitude + Re)**2
+    # Returns gravitational acceleration at a given altitude using Earth's standard gravitational parameter (Mu)
+    return Mu / (altitude + Re)**2
 
 # Exponential atmosphere reference table (base altitude in m, reference
 # density in kg/m^3, scale height in m), from Vallado's "Fundamentals of
